@@ -1,0 +1,35 @@
+# Copyright (C) 2023 Mitsubishi Electric Research Laboratories (MERL)
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: mc-pilco
+channels:
+  - pytorch
+  - defaults
+  - conda-forge
+dependencies:
+  - matplotlib
+  - scipy
+  - python=3.9
+  - scikit-learn
+  - pandas
+  - gpytorch
+  - absl-py
+  - cffi
+  - cython
+  - fasteners
+  - flatbuffers
+  - joblib
+  - mpmath
+  - pillow
+  - seaborn
+  - six
+  - sympy
+  - threadpoolctl
+  - typing-extensions
+  - pyserial
+  - pytorch
+  - numpy=1.24.3
+  - pip
+  - pip:
+    - opencv-python
