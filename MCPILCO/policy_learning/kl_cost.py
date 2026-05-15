@@ -55,6 +55,60 @@ def reverse_kl_gaussian_diag(mu_p, Sigma_p_diag, mu_q, Sigma_q_diag):
     return kl
 
 
+def forward_kl_gaussian_diag(mu_q, Sigma_q_diag, mu_p, Sigma_p_diag):
+    """
+    Closed-form KL(q || p) for two Gaussians with diagonal covariances.
+
+    This is the divergence we MINIMIZE in Variant B:
+        q = particle-induced distribution from GP rollout (fitted Gaussian)
+        p = GFN target distribution (fixed, known parameters)
+
+    KL(q||p) = 0.5 * [ tr(Sigma_p^-1 Sigma_q)
+                       + (mu_q - mu_p)^T Sigma_p^-1 (mu_q - mu_p)
+                       - d
+                       + log(|Sigma_p| / |Sigma_q|) ]
+
+    For diagonal covariances:
+        = 0.5 * sum_d [ sigma_q^2/sigma_p^2
+                       + (mu_q - mu_p)^2 / sigma_p^2
+                       - 1
+                       + log(sigma_p^2 / sigma_q^2) ]
+
+    Properties:
+        - KL(q||p) >= 0,  = 0 iff q == p
+        - Mode-seeking: gradient pushes q's mean toward p's mean and
+          q's variance toward p's variance.
+        - Numerically more stable than KL(p||q) when q can be very tight
+          (because the prior variance Sigma_p is in the denominator,
+          not Sigma_q which depends on particles).
+
+    Args:
+        mu_q:         [..., state_dim]    — particle mean   (batched over time)
+        Sigma_q_diag: [..., state_dim]    — particle variance diagonal
+        mu_p:         [state_dim]         — target mean (fixed)
+        Sigma_p_diag: [state_dim]         — target variance diagonal
+
+    Returns:
+        kl: [...]   — KL per batch element
+    """
+    d = mu_p.shape[-1]
+
+    # tr(Sigma_p^-1 Sigma_q)  for diagonal = sum(Sigma_q / Sigma_p)
+    trace_term = (Sigma_q_diag / Sigma_p_diag).sum(dim=-1)
+
+    # Mahalanobis term: (mu_q - mu_p)^T Sigma_p^-1 (mu_q - mu_p)
+    diff = mu_q - mu_p
+    maha_term = ((diff ** 2) / Sigma_p_diag).sum(dim=-1)
+
+    # log|Sigma_p| - log|Sigma_q|  for diagonal
+    logdet_p = torch.log(Sigma_p_diag).sum(dim=-1)
+    logdet_q = torch.log(Sigma_q_diag).sum(dim=-1)
+    logdet_term = logdet_p - logdet_q
+
+    kl = 0.5 * (trace_term + maha_term - d + logdet_term)
+    return kl
+
+
 def time_weighted_kl_sum(states_sequence, gfn_prior, weighting='quadratic'):
     """
     Sum the reverse KL across the rollout horizon with optional

@@ -29,7 +29,16 @@ import simulation_class.ode_systems as f_ode
 # Load random seed from command line
 p = argparse.ArgumentParser("test cartpole")
 p.add_argument("-seed", type=int, default=1, help="seed")
+p.add_argument("-checkpoint", type=str, default=None,
+               help="Path to trained GFN checkpoint (.pt). "
+                    "Defaults to ../GflowNet/gfn-diffusion/energy_sampling/cartpole_denoising_theta_final.pt")
 locals().update(vars(p.parse_known_args()[0]))
+
+import pathlib
+if checkpoint is None:
+    _repo_root = pathlib.Path(__file__).resolve().parent.parent
+    checkpoint = str(_repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+                     / 'cartpole_denoising_theta_final.pt')
 
 # Set the seed
 torch.manual_seed(seed)
@@ -47,7 +56,7 @@ num_threads = 1
 torch.set_num_threads(num_threads)
 
 print("---- Set environment parameters ----")
-num_trials = 5  # Total trials
+num_trials = 15  # Total trials
 T_sampling = 0.05  # Sampling time
 T_exploration = 3.0  # Duration of the first exploration trial
 T_control = 3.0  # Duration of each of the following trials during learning
@@ -155,11 +164,13 @@ print("\n---- Set cost function (Variant B: reverse KL + chance constraints) ---
 from policy_learning.variant_b_cost import VariantB_Cost
 f_cost_function = VariantB_Cost
 cost_function_par = {
-    'alpha': 10.0,
-    'epsilon': 0.05,
-    'weighting': 'quadratic',
-    'position_bound': 2.4,
-    'angle_bound': 0.2094,
+    'checkpoint_path': checkpoint,
+    'cost_mode': 'kl',          # 'kl' (full forward Gaussian KL) or 'cross_entropy'
+    'alpha': 10.0,              # weight on chance-constraint slack
+    'epsilon': 0.05,            # chance-constraint violation probability
+    'weighting': 'quadratic',   # time weighting w_t = (t/N_h)^2
+    'position_bound': 2.4,      # |x| <= 2.4 m
+    'angle_bound': 0.2094,      # |theta - pi| <= 0.2094 rad (12 deg)
     'dtype': dtype,
     'device': device,
 }
@@ -181,7 +192,7 @@ MC_PILCO_init_dict["f_control_policy"] = f_control_policy  # Control policy func
 MC_PILCO_init_dict["control_policy_par"] = control_policy_par  # Control policy function parameters
 MC_PILCO_init_dict["f_cost_function"] = f_cost_function  # Cost function
 MC_PILCO_init_dict["cost_function_par"] = cost_function_par  # Cost function parameters
-MC_PILCO_init_dict["log_path"] = "results_variant_b/" + str(seed)  # path to save logs of the experiments
+MC_PILCO_init_dict["log_path"] = "results_variant_b_15/" + str(seed)  # path to save logs of the experiments
 MC_PILCO_init_dict["dtype"] = dtype
 MC_PILCO_init_dict["device"] = device
 PL_obj = MC_PILCO.MC_PILCO(**MC_PILCO_init_dict)  # Main object of the algorithm with MC-PILCO properties
@@ -199,16 +210,16 @@ model_optimization_opt_list = [model_optimization_opt_dict] * num_gp
 policy_optimization_dict = {}
 policy_optimization_dict["num_particles"] = 400  # Number of simulated particles in the Monte-Carlo method
 policy_optimization_dict["opt_steps_list"] = [
-    2000,
-    4000,
-    4000,
-    4000,
-    4000,
+    2000,  # trial 1: more steps for first real GP
+    4000, 4000, 4000, 4000,   # trials 2-5
+    4000, 4000, 4000, 4000,   # trials 6-9
+    4000, 4000, 4000, 4000,   # trials 10-13
+    4000, 4000,               # trials 14-15
 ]  # Max number of optimization steps for trial
-policy_optimization_dict["lr_list"] = [0.01, 0.01, 0.01, 0.01, 0.01]  # Initial learning for trial
+policy_optimization_dict["lr_list"] = [0.01] * 15  # Initial learning rate for each trial
 policy_optimization_dict["f_optimizer"] = "lambda p, lr : torch.optim.Adam(p, lr)"  # Specify policy optimizer
 policy_optimization_dict["num_step_print"] = 100  # Frequency of printing to screen partial results
-policy_optimization_dict["p_dropout_list"] = [0.25, 0.25, 0.25, 0.25, 0.25]  # Dropout initial probability for trial
+policy_optimization_dict["p_dropout_list"] = [0.25] * 15  # Dropout initial probability for trial
 policy_optimization_dict["p_drop_reduction"] = 0.25 / 2  # Dropout reduction parameter
 policy_optimization_dict["alpha_diff_cost"] = 0.99  # Monitoring signal parameter α_s for early stopping criterion
 policy_optimization_dict["min_diff_cost"] = 0.08  # Monitoring signal parameter σ_s for early stopping criterion
@@ -232,10 +243,12 @@ reinforce_param_dict["model_optimization_opt_list"] = model_optimization_opt_lis
 reinforce_param_dict["policy_optimization_dict"] = policy_optimization_dict
 
 print("\n---- Save test configuration ----")
+import os
+os.makedirs("results_variant_b_15/" + str(seed), exist_ok=True)
 config_log_dict = {}  # Save test settings
 config_log_dict["MC_PILCO_init_dict"] = MC_PILCO_init_dict
 config_log_dict["reinforce_param_dict"] = reinforce_param_dict
-pkl.dump(config_log_dict, open("results_variant_b/" + str(seed) + "/config_log.pkl", "wb"))
+pkl.dump(config_log_dict, open("results_variant_b_15/" + str(seed) + "/config_log.pkl", "wb"))
 
 # Start the learning algorithm
 PL_obj.reinforce(**reinforce_param_dict)  # Main method of the algorithm to start the learning process

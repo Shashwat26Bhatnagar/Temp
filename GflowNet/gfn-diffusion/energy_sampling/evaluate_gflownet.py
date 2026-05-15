@@ -19,7 +19,7 @@ def build_gfn_model(device):
     gfn_model = GFN(
         dim=4, s_emb_dim=64, hidden_dim=64,
         harmonics_dim=64, t_dim=64, log_var_range=4.0,
-        t_scale=1.0, learned_variance=True, partial_energy=False,
+        t_scale=5.0, learned_variance=True, partial_energy=False,
         clipping=True, lgv_clip=1e2, gfn_clip=1e4,
         pb_scale_range=0.1, learn_pb=True, device=device,
         langevin_scaling_per_dimension=False
@@ -49,16 +49,22 @@ def sample_from_model(gfn_model, energy, n=1000, traj_length=100):
     return states
 
 def plot_phase_portraits(terminal_states_np, output_dir):
+    import math as _math
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
     fig.tight_layout(pad=4.0)
+
+    # Target mean in MC-PILCO frame: upright is theta = pi.
+    MU = [0.0, 0.0, _math.pi, 0.0]
 
     def add_energy_contour(ax, dim_i, dim_j, sigmas, lims):
         # sigmas: [sigma_i, sigma_j]
         # lims:   [[xmin,xmax],[ymin,ymax]]
+        # Contour drawn relative to MU[dim_i], MU[dim_j].
         pi = np.linspace(lims[0][0], lims[0][1], 100)
         pj = np.linspace(lims[1][0], lims[1][1], 100)
         XX, YY = np.meshgrid(pi, pj)
-        E = 0.5 * (XX**2 / sigmas[0]**2 + YY**2 / sigmas[1]**2)
+        E = 0.5 * (((XX - MU[dim_i]) / sigmas[0]) ** 2
+                 + ((YY - MU[dim_j]) / sigmas[1]) ** 2)
         ax.contour(XX, YY, E, levels=6, colors='red', alpha=0.6,
                    linewidths=0.8)
 
@@ -67,21 +73,23 @@ def plot_phase_portraits(terminal_states_np, output_dir):
     col2 = terminal_states_np[:, 2]
     col3 = terminal_states_np[:, 3]
 
+    pi_lo, pi_hi = _math.pi - 0.5, _math.pi + 0.5
+
     # Panel [0,0] — position vs angle:
     ax = axs[0, 0]
     hb = ax.hexbin(col0, col2, gridsize=40, cmap='Blues')
     add_energy_contour(ax, 0, 2, sigmas=[0.5, 0.1],
-                       lims=[[-2,2],[-0.5,0.5]])
+                       lims=[[-2, 2], [pi_lo, pi_hi]])
     fig.colorbar(hb, ax=ax, label='count')
     ax.set_xlabel('Position (m)')
     ax.set_ylabel('Angle (rad)')
-    ax.set_title('Position vs Angle')
+    ax.set_title('Position vs Angle (target theta=pi)')
 
     # Panel [0,1] — velocity vs angular velocity:
     ax = axs[0, 1]
     hb = ax.hexbin(col1, col3, gridsize=40, cmap='Blues')
     add_energy_contour(ax, 1, 3, sigmas=[0.5, 0.1],
-                       lims=[[-2,2],[-0.5,0.5]])
+                       lims=[[-2, 2], [-0.5, 0.5]])
     fig.colorbar(hb, ax=ax, label='count')
     ax.set_xlabel('Velocity (m/s)')
     ax.set_ylabel('Angular velocity (rad/s)')
@@ -91,7 +99,7 @@ def plot_phase_portraits(terminal_states_np, output_dir):
     ax = axs[1, 0]
     hb = ax.hexbin(col0, col1, gridsize=40, cmap='Blues')
     add_energy_contour(ax, 0, 1, sigmas=[0.5, 0.5],
-                       lims=[[-2,2],[-2,2]])
+                       lims=[[-2, 2], [-2, 2]])
     fig.colorbar(hb, ax=ax, label='count')
     ax.set_xlabel('Position (m)')
     ax.set_ylabel('Velocity (m/s)')
@@ -101,7 +109,7 @@ def plot_phase_portraits(terminal_states_np, output_dir):
     ax = axs[1, 1]
     hb = ax.hexbin(col2, col3, gridsize=40, cmap='Blues')
     add_energy_contour(ax, 2, 3, sigmas=[0.1, 0.1],
-                       lims=[[-0.5,0.5],[-0.5,0.5]])
+                       lims=[[pi_lo, pi_hi], [-0.5, 0.5]])
     fig.colorbar(hb, ax=ax, label='count')
     ax.set_xlabel('Angle (rad)')
     ax.set_ylabel('Angular velocity (rad/s)')
@@ -113,18 +121,20 @@ def plot_phase_portraits(terminal_states_np, output_dir):
 
 def analyze_safety_and_timeseries(states_np, output_dir):
     # SECTION 1 — Safety violation percentages:
+    # Upright in MC-PILCO frame is theta = pi, so safety is |theta - pi| < 12 deg.
+    import math as _math
     pos_violations   = np.any(np.abs(states_np[:,:,0]) > 2.4, axis=1)
-    angle_violations = np.any(np.abs(states_np[:,:,2]) > 0.2094, axis=1)
+    angle_violations = np.any(np.abs(states_np[:,:,2] - _math.pi) > 0.2094, axis=1)
     any_violations   = pos_violations | angle_violations
     print("\n=== Safety Verification ===")
-    print(f"Position violations (>2.4m) : {pos_violations.mean()*100:.1f}%")
-    print(f"Angle violations (>12 deg)  : {angle_violations.mean()*100:.1f}%")
-    print(f"Any bound violated          : {any_violations.mean()*100:.1f}%")
+    print(f"Position violations (>2.4m)       : {pos_violations.mean()*100:.1f}%")
+    print(f"Angle violations (|theta-pi|>12d) : {angle_violations.mean()*100:.1f}%")
+    print(f"Any bound violated                : {any_violations.mean()*100:.1f}%")
 
     # SECTION 2 — Time-series variance plot:
     timesteps = np.linspace(0, 1, states_np.shape[1])
-    pos_var   = states_np[:, :, 0].var(axis=0)   # [T+1]
-    angle_var = states_np[:, :, 2].var(axis=0)   # [T+1]
+    pos_var   = states_np[:, :, 0].var(axis=0)                   # [T+1]
+    angle_var = (states_np[:, :, 2] - _math.pi).var(axis=0)      # [T+1] about pi
 
     fig, axs = plt.subplots(2, 1, figsize=(12, 6))
 
@@ -183,7 +193,8 @@ if __name__ == '__main__':
 
     # Reference samples from true target
     sigma = torch.tensor([0.5, 0.5, 0.1, 0.1])
-    gt_samples = torch.randn(args.n_samples, 4) * sigma
+    mu = energy.mu.detach().cpu()
+    gt_samples = mu + torch.randn(args.n_samples, 4) * sigma
 
     # MMD
     mmd = compute_mmd(terminal_states.cpu(), gt_samples)
@@ -192,6 +203,7 @@ if __name__ == '__main__':
     print("\n=== Target Density Alignment ===")
     print(f"Sample mean : {terminal_states.mean(0).tolist()}")
     print(f"Sample std  : {terminal_states.std(0).tolist()}")
+    print(f"Target mean : {mu.tolist()}")
     print(f"Target std  : [0.5, 0.5, 0.1, 0.1]")
     print(f"MMD score   : {mmd:.6f}  (lower is better, 0 = perfect)")
 

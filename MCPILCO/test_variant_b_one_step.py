@@ -29,7 +29,16 @@ import simulation_class.ode_systems as f_ode
 # Load random seed from command line
 p = argparse.ArgumentParser("test cartpole")
 p.add_argument("-seed", type=int, default=1, help="seed")
+p.add_argument("-checkpoint", type=str, default=None,
+               help="Path to trained GFN checkpoint (.pt). "
+                    "Defaults to ../GflowNet/gfn-diffusion/energy_sampling/cartpole_denoising_theta_final.pt")
 locals().update(vars(p.parse_known_args()[0]))
+
+import pathlib
+if checkpoint is None:
+    _repo_root = pathlib.Path(__file__).resolve().parent.parent
+    checkpoint = str(_repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+                     / 'cartpole_denoising_theta_final.pt')
 
 # Set the seed
 torch.manual_seed(seed)
@@ -155,11 +164,13 @@ print("\n---- Set cost function (Variant B: reverse KL + chance constraints) ---
 from policy_learning.variant_b_cost import VariantB_Cost
 f_cost_function = VariantB_Cost
 cost_function_par = {
-    'alpha': 10.0,
-    'epsilon': 0.05,
-    'weighting': 'quadratic',
-    'position_bound': 2.4,
-    'angle_bound': 0.2094,
+    'checkpoint_path': checkpoint,
+    'cost_mode': 'kl',          # 'kl' (full forward Gaussian KL) or 'cross_entropy'
+    'alpha': 10.0,              # weight on chance-constraint slack
+    'epsilon': 0.05,            # chance-constraint violation probability
+    'weighting': 'quadratic',   # time weighting w_t = (t/N_h)^2
+    'position_bound': 2.4,      # |x| <= 2.4 m
+    'angle_bound': 0.2094,      # |theta - pi| <= 0.2094 rad (12 deg)
     'dtype': dtype,
     'device': device,
 }

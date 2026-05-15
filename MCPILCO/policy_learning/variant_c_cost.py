@@ -4,74 +4,65 @@ from policy_learning.gfn_prior import GFNPrior
 from policy_learning.chance_constraint import cartpole_total_slack
 from policy_learning.kl_cost import (
     gaussian_moments_from_particles,
-    forward_kl_gaussian_diag,
+    reverse_kl_gaussian_diag,
 )
 
 
-class VariantB_Cost:
+class VariantC_Cost:
     """
-    MC-PILCO cost driven entirely by the Phase-1 GFlowNet prior plus
-    probabilistic safety. There is **no** hand-designed reward / distance
-    term; the only attractive signal is the divergence between the
-    particle distribution and the GFN target.
+    Variant C: MC-PILCO cost driven by the REVERSE Gaussian KL between the
+    GFN target and the particle distribution, plus probabilistic safety.
 
-        L = sum_t  w_t * div_t  +  alpha * sum_t  slack_t
+        L = sum_t  w_t * KL(p_GFN || q_t)  +  alpha * sum_t  slack_t
 
     where
-        div_t   = divergence at step t (cost_mode='kl' or 'cross_entropy')
-        w_t     = (t / N_h)^2   (quadratic time weighting,
-                                 emphasises the end of the horizon)
+        q_t     = diagonal Gaussian fitted to particle moments at step t
+        p_GFN   = frozen Phase-1 GFN target (analytical Gaussian)
+        w_t     = (t / N_h)^2  (quadratic time weighting)
         slack_t = soft chance-constraint slack at step t
 
-    Cost modes
-    ----------
-    cost_mode='kl'  (DEFAULT, matches the project specification
-                     "min KL(GP || GFN) + chance constraints")
-        div_t = KL(q_t || p_GFN)
-              = closed-form forward KL of two diagonal Gaussians where
-                q_t is fitted to particle moments at step t.
-              = 0  when particles match target distribution exactly.
-        This includes BOTH the cross-entropy term and the entropy of q_t
-        (the latter penalises particle clouds that are too narrow or too
-        wide vs the target).
+    Forward vs. reverse KL — why this variant exists
+    ------------------------------------------------
+    Variant B minimises KL(q || p)  (forward KL, mode-seeking).
+      * sigma_p (fixed) appears in the denominator -> numerically stable.
+      * Pushes q toward p; if p is multi-modal, q collapses to one mode.
 
-    cost_mode='cross_entropy'  (fallback / simpler objective)
-        div_t = -(1/P) sum_i log p_GFN(x_t^(i))
-              = Monte-Carlo cross-entropy estimate.
-        This is KL(q_t || p_GFN) up to the entropy term H(q_t), which is
-        dropped. Useful when the Gaussian approximation of q_t is
-        questionable; differentiable through individual particles rather
-        than through particle moments.
+    Variant C minimises KL(p || q)  (reverse KL, mass-covering).
+      * sigma_q (particle variance) appears in the denominator ->
+        if particles collapse, KL blows up.  This is intentional: the
+        gradient penalises particle clouds that become too narrow to
+        cover the target, which yields more exploratory policies.
+      * For a single-mode unimodal target (Phase-1 Gaussian) reverse KL
+        does NOT change the optimum (both KLs are minimised when q = p),
+        but the gradient geometry differs and can lead the optimiser
+        along a different path.
 
-    Notes
-    -----
-    * The reparameterisation trick (used by MC-PILCO's GP rollout)
-      ensures that both the particles x_t^(i) and the per-step Gaussian
-      moments (mu_q[t], Sigma_q[t]) are differentiable w.r.t. policy
-      parameters.
-    * log p_GFN(x) is evaluated analytically through GFNPrior.log_density.
-      The trained Phase-1 GFN converged to the analytical Gaussian target
-      (MMD ~ 1e-3), so the analytical form is identical to the trained
-      network's target up to the (constant) log Z, and differentiable in
-      particle coordinates.
-    * The chance-constraint slack also derives from particle moments
-      (gaussian_moments_from_particles), so the KL mode shares its
-      Gaussian fit with the safety term.
+    Numerical safeguards
+    --------------------
+      * gaussian_moments_from_particles() floors the diagonal variance
+        with +1e-8 before any division -> avoids inf/NaN when particles
+        nearly collapse early in training.
+      * Cost mode is forced to 'kl' here; cross-entropy is undefined for
+        reverse direction without an explicit p sampler at every step.
+
+    Differentiability
+    -----------------
+    The reparameterisation trick in MC-PILCO's GP rollout makes the
+    per-step particle moments (mu_q[t], Sigma_q[t]) differentiable in the
+    policy parameters, so reverse_kl_gaussian_diag(mu_p, Sigma_p_diag,
+    mu_q[t], Sigma_q_diag[t]) yields a usable gradient.
     """
 
     def __init__(self,
                  checkpoint_path,
-                 alpha=10.0,
-                 epsilon=0.05,
+                 alpha=5.0,
+                 epsilon=0.10,
                  weighting='quadratic',
                  position_bound=2.4,
-                 angle_bound=0.2094,
+                 angle_bound=0.35,
                  num_ref_samples=512,
-                 cost_mode='kl',
                  dtype=torch.float64,
                  device=torch.device('cpu')):
-        assert cost_mode in ('kl', 'cross_entropy'), (
-            f"Unknown cost_mode '{cost_mode}'. Choose 'kl' or 'cross_entropy'.")
         assert weighting in ('quadratic', 'linear', 'none', 'uniform'), (
             f"Unknown weighting '{weighting}'.")
 
@@ -80,7 +71,6 @@ class VariantB_Cost:
         self.weighting = weighting
         self.position_bound = position_bound
         self.angle_bound = angle_bound
-        self.cost_mode = cost_mode
         self.dtype = dtype
         self.device = device
 
@@ -95,9 +85,9 @@ class VariantB_Cost:
         self.last_slack_per_step = None
         self.last_weights = None
 
-        print(f"[VariantB_Cost] cost_mode = '{cost_mode}', "
+        print(f"[VariantC_Cost] cost_mode = 'reverse_kl', "
               f"alpha = {alpha}, epsilon = {epsilon}, weighting = '{weighting}'")
-        print(f"[VariantB_Cost] position_bound = {position_bound} m, "
+        print(f"[VariantC_Cost] position_bound = {position_bound} m, "
               f"angle_bound = {angle_bound} rad "
               f"({angle_bound * 180 / 3.14159:.2f} deg around theta=pi)")
 
@@ -108,8 +98,7 @@ class VariantB_Cost:
         """
         Args:
             states_sequence: [N_h+1, num_particles, 4]
-            inputs_sequence: [N_h+1, num_particles, 1]  (unused — cost has
-                                                         no input penalty)
+            inputs_sequence: [N_h+1, num_particles, 1]  (unused)
             trial_index:     int (unused, MC-PILCO interface)
 
         Returns:
@@ -120,26 +109,18 @@ class VariantB_Cost:
         N_h = N_h_plus_1 - 1
 
         # ============================================================
-        # 1) Per-step divergence from GFN target
+        # 1) Per-step REVERSE KL from particles' Gaussian fit to target
         # ============================================================
-        if self.cost_mode == 'kl':
-            # Fit diagonal Gaussian to particles at each timestep.
-            # mu_q, Sigma_q_diag: [N_h+1, 4]
-            mu_q, Sigma_q_diag = gaussian_moments_from_particles(states_sequence)
+        mu_q, Sigma_q_diag = gaussian_moments_from_particles(states_sequence)
 
-            # Cast target params to particles' dtype/device.
-            mu_p = self.gfn_prior.mu_p.to(dtype=states_sequence.dtype,
-                                          device=states_sequence.device)
-            Sigma_p_diag = self.gfn_prior.Sigma_p_diag.to(
-                dtype=states_sequence.dtype, device=states_sequence.device)
+        mu_p = self.gfn_prior.mu_p.to(dtype=states_sequence.dtype,
+                                      device=states_sequence.device)
+        Sigma_p_diag = self.gfn_prior.Sigma_p_diag.to(
+            dtype=states_sequence.dtype, device=states_sequence.device)
 
-            # Forward Gaussian KL: KL(q_t || p_GFN) for each timestep.
-            divergence_per_step = forward_kl_gaussian_diag(
-                mu_q, Sigma_q_diag, mu_p, Sigma_p_diag)   # [N_h+1]
-
-        else:  # cost_mode == 'cross_entropy'
-            log_p = self.gfn_prior.log_density(states_sequence)   # [N_h+1, P]
-            divergence_per_step = -log_p.mean(dim=1)              # [N_h+1]
+        # KL(p || q) — note argument order vs. Variant B
+        divergence_per_step = reverse_kl_gaussian_diag(
+            mu_p, Sigma_p_diag, mu_q, Sigma_q_diag)               # [N_h+1]
 
         # ============================================================
         # 2) Quadratic time weighting (emphasise end of horizon)
@@ -157,7 +138,7 @@ class VariantB_Cost:
         weighted_div_per_step = weights * divergence_per_step    # [N_h+1]
 
         # ============================================================
-        # 3) Soft chance-constraint slack
+        # 3) Soft chance-constraint slack (relaxed bounds + epsilon)
         # ============================================================
         slack_per_step, _ = cartpole_total_slack(
             states_sequence,
@@ -180,9 +161,8 @@ class VariantB_Cost:
 
     def __call__(self, states_sequence, inputs_sequence, trial_index):
         """MC-PILCO calls the cost object as a function returning
-        (mean_cost, std_cost). std is zero because per-particle averaging
-        already happened inside cost_function (either via moments or
-        via mean over particles)."""
+        (mean_cost, std_cost). std is zero because particle averaging
+        already happened inside cost_function via moment fitting."""
         cost_per_step = self.cost_function(states_sequence,
                                            inputs_sequence,
                                            trial_index)

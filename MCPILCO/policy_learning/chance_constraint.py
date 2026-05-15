@@ -62,15 +62,20 @@ def cartpole_total_slack(states_sequence,
     dtype = mu.dtype
 
     # 4 constraints: +x, -x, +theta, -theta
+    # Position constraints: |x| <= position_bound  (target x=0)
     h_pos_pos   = torch.tensor([ 1.0, 0.0, 0.0, 0.0], dtype=dtype, device=device)
     h_pos_neg   = torch.tensor([-1.0, 0.0, 0.0, 0.0], dtype=dtype, device=device)
+    # Angle constraints: |theta - pi| <= angle_bound  (upright at theta=pi)
+    #   theta <= pi + angle_bound   and   -theta <= angle_bound - pi
     h_angle_pos = torch.tensor([ 0.0, 0.0, 1.0, 0.0], dtype=dtype, device=device)
     h_angle_neg = torch.tensor([ 0.0, 0.0,-1.0, 0.0], dtype=dtype, device=device)
+    angle_upper = math.pi + angle_bound    # theta <= pi + 0.2094
+    angle_lower = angle_bound - math.pi    # -theta <= 0.2094 - pi  (i.e. theta >= pi - 0.2094)
 
     s1 = chance_constraint_slack(mu, Sigma_diag, h_pos_pos,   position_bound, epsilon)
     s2 = chance_constraint_slack(mu, Sigma_diag, h_pos_neg,   position_bound, epsilon)
-    s3 = chance_constraint_slack(mu, Sigma_diag, h_angle_pos, angle_bound,    epsilon)
-    s4 = chance_constraint_slack(mu, Sigma_diag, h_angle_neg, angle_bound,    epsilon)
+    s3 = chance_constraint_slack(mu, Sigma_diag, h_angle_pos, angle_upper,    epsilon)
+    s4 = chance_constraint_slack(mu, Sigma_diag, h_angle_neg, angle_lower,    epsilon)
 
     slack_per_step = s1 + s2 + s3 + s4                # [num_instants]
     slack_total = slack_per_step.sum()

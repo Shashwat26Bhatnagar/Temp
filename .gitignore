@@ -1,0 +1,36 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Claude Code internal files
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs (plain text, large)
+*.log
+
+# Temporary files
+*.tmp
+*.bak
