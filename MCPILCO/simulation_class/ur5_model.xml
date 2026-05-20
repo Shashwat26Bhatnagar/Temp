@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+UR5 MuJoCo Model — simplified for MC-PILCO integration
+Link lengths and masses approximate Universal Robots UR5 datasheet.
+Joints: shoulder_pan, shoulder_lift, elbow, wrist1, wrist2, wrist3
+All joints torque-controlled; joint limits match UR5 specs.
+-->
+<mujoco model="ur5">
+
+  <compiler angle="radian" meshdir="." autolimits="true"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+
+  <default>
+    <joint damping="0.5" armature="0.01" frictionloss="0.1"/>
+    <geom contype="1" conaffinity="1" condim="4" friction="1 0.005 0.0001" rgba="0.4 0.6 0.8 1"/>
+    <motor ctrllimited="true" ctrlrange="-150 150"/>
+  </default>
+
+  <worldbody>
+    <!-- Base -->
+    <body name="base" pos="0 0 0">
+      <geom type="cylinder" size="0.075 0.05" rgba="0.3 0.3 0.3 1"/>
+      <inertial pos="0 0 0" mass="4.0" diaginertia="0.00443 0.00443 0.0072"/>
+
+      <!-- Joint 1: shoulder_pan — rotates around Z axis -->
+      <body name="shoulder" pos="0 0 0.089">
+        <joint name="shoulder_pan_joint" type="hinge" axis="0 0 1"
+               range="-3.14159 3.14159" pos="0 0 0"/>
+        <geom type="cylinder" size="0.06 0.044" rgba="0.3 0.3 0.3 1"/>
+        <inertial pos="0 0 0" mass="3.7" diaginertia="0.0102 0.0102 0.00666"/>
+
+        <!-- Joint 2: shoulder_lift — rotates around Y axis -->
+        <body name="upper_arm" pos="0 0.135 0">
+          <joint name="shoulder_lift_joint" type="hinge" axis="0 1 0"
+                 range="-3.14159 3.14159" pos="0 0 0"/>
+          <geom type="capsule" fromto="0 0 0 0 0 0.425" size="0.038" rgba="0.6 0.6 0.6 1"/>
+          <inertial pos="0 0 0.2125" mass="8.393" diaginertia="0.226 0.226 0.0151"/>
+
+          <!-- Joint 3: elbow — rotates around Y axis -->
+          <body name="forearm" pos="0 -0.135 0.425">
+            <joint name="elbow_joint" type="hinge" axis="0 1 0"
+                   range="-3.14159 3.14159" pos="0 0 0"/>
+            <geom type="capsule" fromto="0 0 0 0 0 0.392" size="0.03" rgba="0.6 0.6 0.6 1"/>
+            <inertial pos="0 0 0.196" mass="2.275" diaginertia="0.0494 0.0494 0.00281"/>
+
+            <!-- Joint 4: wrist1 — rotates around Y axis -->
+            <body name="wrist1" pos="0 0 0.392">
+              <joint name="wrist_1_joint" type="hinge" axis="0 1 0"
+                     range="-3.14159 3.14159" pos="0 0 0"/>
+              <geom type="cylinder" size="0.028 0.0535" rgba="0.3 0.3 0.3 1"/>
+              <inertial pos="0 0 0" mass="1.219" diaginertia="0.00111 0.00111 0.00111"/>
+
+              <!-- Joint 5: wrist2 — rotates around Z axis -->
+              <body name="wrist2" pos="0 0.093 0">
+                <joint name="wrist_2_joint" type="hinge" axis="0 0 1"
+                       range="-3.14159 3.14159" pos="0 0 0"/>
+                <geom type="cylinder" size="0.028 0.0535" pos="0 0 0" euler="1.5708 0 0"
+                      rgba="0.3 0.3 0.3 1"/>
+                <inertial pos="0 0 0" mass="1.219" diaginertia="0.00111 0.00111 0.00111"/>
+
+                <!-- Joint 6: wrist3 — rotates around Y axis -->
+                <body name="wrist3" pos="0 0 0.082">
+                  <joint name="wrist_3_joint" type="hinge" axis="0 1 0"
+                         range="-3.14159 3.14159" pos="0 0 0"/>
+                  <geom type="cylinder" size="0.028 0.025" rgba="0.3 0.3 0.3 1"/>
+                  <inertial pos="0 0 0" mass="0.1879" diaginertia="0.000132 0.000132 0.000132"/>
+
+                  <!-- End-effector site -->
+                  <body name="ee_body" pos="0 0.082 0">
+                    <site name="end_effector" pos="0 0 0" size="0.015"
+                          rgba="1 0 0 1" type="sphere"/>
+                    <geom type="sphere" size="0.015" rgba="1 0 0 0.8"/>
+                  </body>
+
+                </body>  <!-- wrist3 -->
+              </body>    <!-- wrist2 -->
+            </body>      <!-- wrist1 -->
+          </body>        <!-- forearm -->
+        </body>          <!-- upper_arm -->
+      </body>            <!-- shoulder -->
+    </body>              <!-- base -->
+  </worldbody>
+
+  <!-- Torque actuators, one per joint, max 150 Nm -->
+  <actuator>
+    <motor name="shoulder_pan"  joint="shoulder_pan_joint"  gear="1" ctrlrange="-150 150"/>
+    <motor name="shoulder_lift" joint="shoulder_lift_joint" gear="1" ctrlrange="-150 150"/>
+    <motor name="elbow"         joint="elbow_joint"         gear="1" ctrlrange="-100 100"/>
+    <motor name="wrist_1"       joint="wrist_1_joint"       gear="1" ctrlrange="-28 28"/>
+    <motor name="wrist_2"       joint="wrist_2_joint"       gear="1" ctrlrange="-28 28"/>
+    <motor name="wrist_3"       joint="wrist_3_joint"       gear="1" ctrlrange="-28 28"/>
+  </actuator>
+
+</mujoco>

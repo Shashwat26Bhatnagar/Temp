@@ -703,9 +703,13 @@ class Speed_Model_learning_RBF_angle_state(Model_learning):
 
         if particle_pred == True:
             # sample delta speed from distribution
-            # Clamp variance to avoid NaN/inf from GP extrapolation instability
-            delta_vel_var_safe = torch.clamp(delta_vel_var, min=1e-12, max=1e6)
-            delta_speed_distribution = Normal(delta_vel_mean, torch.sqrt(delta_vel_var_safe))
+            # Sanitise variance: clamp + nan_to_num to handle NaN/Inf from
+            # GP extrapolation instability in high-dim state spaces.
+            delta_vel_var_safe = torch.nan_to_num(delta_vel_var, nan=1e-6, posinf=1e6, neginf=1e-12)
+            delta_vel_var_safe = torch.clamp(delta_vel_var_safe, min=1e-12, max=1e6)
+            delta_vel_mean_safe = torch.nan_to_num(delta_vel_mean, nan=0.0, posinf=1e4, neginf=-1e4)
+            delta_speed_distribution = Normal(delta_vel_mean_safe, torch.sqrt(delta_vel_var_safe),
+                                              validate_args=False)
             delta_speed_sample = delta_speed_distribution.rsample()
             # delta_speed_sample = delta_vel_mean + torch.sqrt(delta_vel_var)*torch.randn(delta_vel_mean.shape, dtype=self.dtype, device=self.device)
         else:
@@ -718,6 +722,12 @@ class Speed_Model_learning_RBF_angle_state(Model_learning):
             + self.T_sampling * current_state[:, self.vel_indeces]
             + self.T_sampling / 2 * delta_speed_sample
         )
+
+        # State clamping: prevent runaway particles when GP extrapolates wildly
+        # in high-dim spaces. Wide bands -- only catches catastrophic divergence,
+        # not legitimate motion.
+        next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1e3, neginf=-1e3)
+        next_states = torch.clamp(next_states, min=-50.0, max=50.0)
 
         return next_states, delta_vel_mean, delta_vel_var
 
@@ -859,9 +869,13 @@ class SP_Speed_Model_learning_Furuta(Model_learning):
 
         if particle_pred == True:
             # sample delta speed from distribution
-            # Clamp variance to avoid NaN/inf from GP extrapolation instability
-            delta_vel_var_safe = torch.clamp(delta_vel_var, min=1e-12, max=1e6)
-            delta_speed_distribution = Normal(delta_vel_mean, torch.sqrt(delta_vel_var_safe))
+            # Sanitise variance: clamp + nan_to_num to handle NaN/Inf from
+            # GP extrapolation instability in high-dim state spaces.
+            delta_vel_var_safe = torch.nan_to_num(delta_vel_var, nan=1e-6, posinf=1e6, neginf=1e-12)
+            delta_vel_var_safe = torch.clamp(delta_vel_var_safe, min=1e-12, max=1e6)
+            delta_vel_mean_safe = torch.nan_to_num(delta_vel_mean, nan=0.0, posinf=1e4, neginf=-1e4)
+            delta_speed_distribution = Normal(delta_vel_mean_safe, torch.sqrt(delta_vel_var_safe),
+                                              validate_args=False)
             delta_speed_sample = delta_speed_distribution.rsample()
             # delta_speed_sample = delta_vel_mean + torch.sqrt(delta_vel_var)*torch.randn(delta_vel_mean.shape, dtype=self.dtype, device=self.device)
         else:
@@ -874,5 +888,11 @@ class SP_Speed_Model_learning_Furuta(Model_learning):
             + self.T_sampling * current_state[:, self.vel_indeces]
             + self.T_sampling / 2 * delta_speed_sample
         )
+
+        # State clamping: prevent runaway particles when GP extrapolates wildly
+        # in high-dim spaces. Wide bands -- only catches catastrophic divergence,
+        # not legitimate motion.
+        next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1e3, neginf=-1e3)
+        next_states = torch.clamp(next_states, min=-50.0, max=50.0)
 
         return next_states, delta_vel_mean, delta_vel_var

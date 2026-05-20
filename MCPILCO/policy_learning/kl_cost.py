@@ -109,6 +109,61 @@ def forward_kl_gaussian_diag(mu_q, Sigma_q_diag, mu_p, Sigma_p_diag):
     return kl
 
 
+def wasserstein2_squared_gaussian_diag(mu_p, Sigma_p_diag,
+                                       mu_q, Sigma_q_diag,
+                                       eps=1e-12):
+    """
+    Closed-form squared 2-Wasserstein distance between two diagonal Gaussians.
+
+    For p = N(mu_p, diag(sigma_p^2)) and q = N(mu_q, diag(sigma_q^2)):
+
+        W2^2(p, q) = || mu_p - mu_q ||^2 + || sigma_p - sigma_q ||^2
+
+    where sigma_i = sqrt(Sigma_diag_i).
+
+    Derivation: the general W2^2 between Gaussians is
+        || mu_p - mu_q ||^2 + tr( Sigma_p + Sigma_q
+                                  - 2 * (Sigma_p^{1/2} Sigma_q Sigma_p^{1/2})^{1/2} )
+    For commuting diagonal covariances, Sigma_p^{1/2} Sigma_q Sigma_p^{1/2}
+    = diag(sigma_p^2 sigma_q^2) and its square root = diag(sigma_p sigma_q),
+    so the trace term collapses to
+        sum_i (sigma_p_i^2 + sigma_q_i^2 - 2 sigma_p_i sigma_q_i)
+        = sum_i (sigma_p_i - sigma_q_i)^2.
+
+    Why W2 instead of KL?
+    ---------------------
+      * Symmetric:  W2(p, q) = W2(q, p).
+      * No sigma in denominator -> numerically stable even when particles
+        collapse to a point (sigma_q -> 0).
+      * The mean term ||mu_p - mu_q||^2 is exactly the pointwise tracking
+        distance used by standard MC-PILCO -- so W2 naturally embeds
+        the pointwise tracking signal that distributional KL lacks.
+      * The std term ||sigma_p - sigma_q||^2 penalises both over- and under-
+        dispersion symmetrically (no "wide-cloud cheat" that reverse KL
+        suffers from).
+      * Compute cost is lower (no log, no division).
+
+    Args:
+        mu_p:         [..., d]   prior mean
+        Sigma_p_diag: [..., d]   prior variance diagonal
+        mu_q:         [..., d]   approximating mean
+        Sigma_q_diag: [..., d]   approximating variance diagonal
+        eps:          small positive constant for numerical sqrt
+
+    Returns:
+        w2_sq: [...]  squared W2 per batch element
+    """
+    # Mean term -- pointwise squared distance between means
+    mean_term = ((mu_p - mu_q) ** 2).sum(dim=-1)
+
+    # Std term -- squared distance between standard deviations
+    std_p = torch.sqrt(Sigma_p_diag + eps)
+    std_q = torch.sqrt(Sigma_q_diag + eps)
+    std_term = ((std_p - std_q) ** 2).sum(dim=-1)
+
+    return mean_term + std_term
+
+
 def time_weighted_kl_sum(states_sequence, gfn_prior, weighting='quadratic'):
     """
     Sum the reverse KL across the rollout horizon with optional

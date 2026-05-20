@@ -32,7 +32,7 @@ parser.add_argument('--subtb_lambda', type=int, default=2)
 parser.add_argument('--t_scale', type=float, default=5.)
 parser.add_argument('--log_var_range', type=float, default=4.)
 parser.add_argument('--energy', type=str, default='9gmm',
-                    choices=('9gmm', '25gmm', 'hard_funnel', 'easy_funnel', 'many_well', 'cartpole'))
+                    choices=('9gmm', '25gmm', 'hard_funnel', 'easy_funnel', 'many_well', 'cartpole', 'ur5'))
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
@@ -98,6 +98,9 @@ parser.add_argument('--eval', action='store_true', default=False)
 parser.add_argument('--no_wandb', action='store_true', default=False)
 parser.add_argument('--discretizer', type=str, default='none')
 parser.add_argument('--discretizer_traj_length', type=int, default=100)
+parser.add_argument('--resume', type=str, default=None,
+                    help='Path to a *.pt checkpoint to resume training from. '
+                         'Loads model_state_dict and uses the saved step as starting epoch.')
 args = parser.parse_args()
 
 set_seed(args.seed)
@@ -136,6 +139,9 @@ def get_energy():
     elif args.energy == 'cartpole':
         from energies.cartpole import CartPoleEnergy
         energy = CartPoleEnergy(device=device)
+    elif args.energy == 'ur5':
+        from energies.ur5 import UR5Energy
+        energy = UR5Energy(device=device)
     return energy
 
 
@@ -281,7 +287,7 @@ def train():
         os.makedirs(name)
 
     energy = get_energy()
-    if args.energy == 'cartpole':
+    if args.energy in ('cartpole', 'ur5'):
         eval_data = None
     else:
         eval_data = energy.sample(eval_data_size).to(device)
@@ -305,6 +311,17 @@ def train():
     gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
                                       args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
 
+    # --- Optional resume from checkpoint ---
+    start_step = 0
+    if args.resume is not None:
+        print(f"[resume] Loading checkpoint: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        state_dict = ckpt.get('model_state_dict', ckpt)
+        gfn_model.load_state_dict(state_dict)
+        start_step = int(ckpt.get('step', 0))
+        print(f"[resume] Model loaded. Continuing from step {start_step} "
+              f"to step {args.epochs} (optimizer state is fresh — Adam adapts quickly).")
+
     print(gfn_model)
     metrics = dict()
 
@@ -313,7 +330,7 @@ def train():
     buffer_ls = ReplayBuffer(args.buffer_size, device, energy.log_reward,args.batch_size, data_ndim=energy.data_ndim, beta=args.beta,
                           rank_weight=args.rank_weight, prioritized=args.prioritized)
     gfn_model.train()
-    for i in trange(args.epochs + 1):
+    for i in trange(start_step, args.epochs + 1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
         if i % 100 == 0:
@@ -337,6 +354,17 @@ def train():
                         'sigma': [0.5, 0.5, 0.1, 0.1],
                         'data_ndim': 4,
                     }, f'cartpole_denoising_theta_step{i}.pt')
+                elif args.energy == 'ur5':
+                    torch.save({
+                        'step': i,
+                        'model_state_dict': gfn_model.state_dict(),
+                        'loss': metrics.get('train/loss', 0.0),
+                        'args': vars(args),
+                        'description': 'denoising_theta for UR5 R^12 state space (q1..q6, dq1..dq6)',
+                        'mu': energy.mu.detach().cpu().tolist(),
+                        'sigma': energy.sigma.detach().cpu().tolist(),
+                        'data_ndim': 12,
+                    }, f'ur5_denoising_theta_step{i}.pt')
 
     eval_results = final_eval(energy, gfn_model)
     metrics.update(eval_results)
@@ -352,10 +380,20 @@ def train():
             'data_ndim': 4,
         }, 'cartpole_denoising_theta_final.pt')
         print("Saved denoising_theta to cartpole_denoising_theta_final.pt")
+    elif args.energy == 'ur5':
+        torch.save({
+            'model_state_dict': gfn_model.state_dict(),
+            'args': vars(args),
+            'description': 'denoising_theta for UR5 R^12 state space (q1..q6, dq1..dq6)',
+            'mu': energy.mu.detach().cpu().tolist(),
+            'sigma': energy.sigma.detach().cpu().tolist(),
+            'data_ndim': 12,
+        }, 'ur5_denoising_theta_final.pt')
+        print("Saved denoising_theta to ur5_denoising_theta_final.pt")
 
 
 def final_eval(energy, gfn_model):
-    if args.energy == 'cartpole':
+    if args.energy in ('cartpole', 'ur5'):
         final_eval_data = None
     else:
         final_eval_data = energy.sample(final_eval_data_size)
