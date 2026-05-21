@@ -204,7 +204,7 @@ policy_reinit_dict = {
 # ---------------------------------------------------------------------------
 # Cost function (Variant C: reverse KL + chance constraints)
 # ---------------------------------------------------------------------------
-print("\n---- Set cost function (Variant F: reverse KL with tight sigma) ----")
+print("\n---- Set cost function (Variant F: reverse KL with RELAXED safety) ----")
 from policy_learning.ur5_variant_f_cost import UR5_VariantF_Cost
 f_cost_function = UR5_VariantF_Cost
 cost_function_par = {
@@ -212,13 +212,19 @@ cost_function_par = {
     'q_ref':           q_ref,
     'dq_ref':          dq_ref,
     'T_control':       T_control,
-    'alpha':           5.0,
-    'epsilon':         0.10,
+    # ---- RELAXED chance-constraint safety ----
+    # Halve the slack weight and double the allowed violation probability
+    # so the cost is dominated by the KL term, not the safety slack.
+    # This lets the reverse-KL signal drive learning more directly.
+    'alpha':           2.0,          # was 5.0 -> halve safety penalty weight
+    'epsilon':         0.20,         # was 0.10 -> allow 20% violation prob
     'weighting':       'quadratic',
-    # Tighter target sigmas than the GFN's trained (0.10 / 0.50) values to
-    # enforce trajectory tracking rather than terminal-state matching.
-    'sigma_p_q':       0.05,         # 0.05 rad   (was 0.10 in Variant C)
-    'sigma_p_dq':      0.20,         # 0.20 rad/s (was 0.50 in Variant C)
+    # sigma_p kept TIGHT (0.05 / 0.20) -- loosening it actually hurts
+    # reverse KL because the trace term sigma_p^2 / sigma_q^2 grows when
+    # sigma_p increases relative to sigma_q. Tight sigma_p ~ matches the
+    # expected GP-rollout sigma_q, which minimises the trace term.
+    'sigma_p_q':       0.05,
+    'sigma_p_dq':      0.20,
     'q_min':           tuple(ur5_env.q_min),
     'q_max':           tuple(ur5_env.q_max),
     'dtype':           dtype,
