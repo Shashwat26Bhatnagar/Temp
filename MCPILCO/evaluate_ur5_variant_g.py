@@ -34,7 +34,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
-from mpl_toolkits.mplot3d import Axes3D     # noqa: F401 (registers projection)
+# Note: do NOT explicitly `from mpl_toolkits.mplot3d import Axes3D`.
+# On systems with mixed matplotlib installs (e.g. pip-user + apt system)
+# the explicit import can fail with ModuleNotFoundError on matplotlib.tri.
+# Modern matplotlib auto-registers the '3d' projection on first use.
 
 import mujoco
 

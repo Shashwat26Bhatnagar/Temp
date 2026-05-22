@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
-from mpl_toolkits.mplot3d import Axes3D     # noqa: F401 (registers projection)
+# Auto-registered via add_subplot(projection='3d') -- no explicit import.
 
 import mujoco
 
