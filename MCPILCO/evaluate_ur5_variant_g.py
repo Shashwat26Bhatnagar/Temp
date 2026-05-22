@@ -51,6 +51,12 @@ p.add_argument("-no_anim", action="store_true",
                help="Skip the GIF animation (faster).")
 p.add_argument("-anim_step", type=int, default=4,
                help="Render every Nth timestep in the animation.")
+p.add_argument("-gfn_checkpoint", type=str, default=None,
+               help="Path to the trained GFN .pt (used to overlay GFN sample "
+                    "trajectories on the joint plots). Defaults to the "
+                    "ur5_denoising_theta_step25000.pt sibling location.")
+p.add_argument("-n_gfn_samples", type=int, default=20,
+               help="Number of GFN trajectories to overlay on the plots.")
 args = p.parse_args()
 
 save_dir = pathlib.Path(args.save)
@@ -89,6 +95,99 @@ def savefig(fig, name):
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved -> {path}")
+
+
+# -----------------------------------------------------------------------
+# Sample GFN trajectories so we can overlay them on the joint plots.
+# Returns array of shape [n_samples, T_gfn+1, 12] and the corresponding
+# time axis in physical seconds (linearly mapped from diffusion time).
+# -----------------------------------------------------------------------
+def sample_gfn_trajectories(n_samples=20, gfn_ckpt_path=None,
+                            T_control_seconds=4.0):
+    import torch
+
+    # Resolve checkpoint path
+    if gfn_ckpt_path is None:
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        gfn_ckpt_path = str(
+            repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+            / 'ur5_denoising_theta_step25000.pt')
+
+    if not pathlib.Path(gfn_ckpt_path).exists():
+        print(f"  [WARN] GFN checkpoint not found at {gfn_ckpt_path}; "
+              f"skipping GFN trace overlay.")
+        return None, None
+
+    # Make the GflowNet package importable
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    gfn_dir = repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+    if (gfn_dir / 'models' / 'gfn.py').exists():
+        if str(gfn_dir) not in sys.path:
+            sys.path.insert(0, str(gfn_dir))
+    else:
+        print(f"  [WARN] GflowNet package not at {gfn_dir}; "
+              f"skipping GFN trace overlay.")
+        return None, None
+
+    from models.gfn import GFN
+
+    device = torch.device('cpu')
+
+    # Build the GFN architecture (must match training)
+    gfn_model = GFN(
+        dim=12, s_emb_dim=64, hidden_dim=64,
+        harmonics_dim=64, t_dim=64, log_var_range=4.0,
+        t_scale=5.0, learned_variance=True, partial_energy=False,
+        clipping=True, lgv_clip=1e2, gfn_clip=1e4,
+        pb_scale_range=0.1, learn_pb=True, device=device,
+        langevin_scaling_per_dimension=False,
+    ).to(device)
+
+    ckpt = torch.load(gfn_ckpt_path, map_location=device, weights_only=False)
+    state = ckpt.get('model_state_dict', ckpt)
+    gfn_model.load_state_dict(state)
+    gfn_model.eval()
+    for prm in gfn_model.parameters():
+        prm.requires_grad_(False)
+
+    # Analytical UR5 target energy (must match energies/ur5.py)
+    mu_t = torch.tensor(ckpt.get('mu',
+            [0.1884, -1.9495, 2.0472, -1.7108, -1.6774, 0.0,
+             -0.5045, -0.0036, 0.0162, 0.0, 0.0921, 0.0]),
+                       dtype=torch.float32, device=device)
+    sigma_t = torch.tensor(ckpt.get('sigma',
+            [0.10] * 6 + [0.50] * 6),
+                          dtype=torch.float32, device=device)
+
+    def log_reward(x, condition=None):
+        return -0.5 * ((x - mu_t) ** 2 / sigma_t ** 2).sum(dim=-1)
+
+    with torch.no_grad():
+        init_state = torch.zeros(n_samples, 12,
+                                 dtype=torch.float32, device=device)
+        states, _, _, _ = gfn_model.get_trajectory_fwd(
+            init_state, None, log_reward)
+    trajs = states.cpu().numpy()                # [n_samples, T_gfn+1, 12]
+
+    # Map diffusion time -> physical time axis [0, T_control_seconds]
+    T_gfn_plus_1 = trajs.shape[1]
+    gfn_time_axis = np.linspace(0.0, T_control_seconds, T_gfn_plus_1)
+
+    return trajs, gfn_time_axis
+
+
+# -----------------------------------------------------------------------
+# Pre-sample GFN trajectories ONCE -- used in plots 2 and 3
+# -----------------------------------------------------------------------
+print(f"\nSampling {args.n_gfn_samples} GFN trajectories for overlay ...")
+gfn_trajs, gfn_time_axis = sample_gfn_trajectories(
+    n_samples=args.n_gfn_samples,
+    gfn_ckpt_path=args.gfn_checkpoint,
+    T_control_seconds=T_control,
+)
+if gfn_trajs is not None:
+    print(f"  GFN trajectories shape: {gfn_trajs.shape}  "
+          f"(samples x diffusion-steps x state-dim)")
 
 
 # -----------------------------------------------------------------------
@@ -141,6 +240,16 @@ fig.suptitle(f"UR5 Variant G - joint positions (goal-reaching)  "
 
 for j in range(6):
     ax = axes[j]
+    # -- GFN sampled trajectories (the 'where GFN goes' overlay) --
+    if gfn_trajs is not None:
+        for k in range(gfn_trajs.shape[0]):
+            ax.plot(gfn_time_axis, gfn_trajs[k, :, j],
+                    color="orange", alpha=0.18, lw=0.7)
+        # Mean of GFN samples for clarity
+        gfn_mean = gfn_trajs[:, :, j].mean(axis=0)
+        ax.plot(gfn_time_axis, gfn_mean,
+                color="darkorange", lw=1.4, alpha=0.9,
+                label=f"GFN mean (N={gfn_trajs.shape[0]} samples)")
     # Constant target line for goal-reaching
     ax.axhline(q_target[j], color="green", ls="--", lw=1.4,
                label=f"target q_ref(4s) = {q_target[j]:.2f}")
@@ -150,18 +259,18 @@ for j in range(6):
     # Exploration trial (random torques)
     if n_hist > 0:
         ax.plot(t_axis[:len(states_hist[0])], states_hist[0][:, j],
-                color="gray", lw=1.0, alpha=0.5, label="exploration")
+                color="gray", lw=1.0, alpha=0.55, label="exploration")
     # Latest policy rollout
     if n_hist > 1:
         ax.plot(t_axis[:len(states_hist[1])], states_hist[1][:, j],
-                color="crimson", lw=1.5, label=f"policy trial {n_hist-1}")
+                color="crimson", lw=1.6, label=f"policy trial {n_hist-1}")
     ax.set_title(f"q[{j}]  {JOINT_NAMES[j]}", fontsize=9)
     ax.set_ylabel("rad")
     if j >= 3:
         ax.set_xlabel("Time (s)")
     ax.grid(True, alpha=0.3)
     if j == 0:
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=6, loc="best", ncol=1)
 
 plt.tight_layout()
 savefig(fig, "02_joint_positions.png")
@@ -180,23 +289,32 @@ fig.suptitle("UR5 Variant G - joint velocities (goal-reaching)",
 
 for j in range(6):
     ax = axes[j]
+    # -- GFN sampled trajectories (dimension 6+j = velocity j) --
+    if gfn_trajs is not None:
+        for k in range(gfn_trajs.shape[0]):
+            ax.plot(gfn_time_axis, gfn_trajs[k, :, 6 + j],
+                    color="orange", alpha=0.18, lw=0.7)
+        gfn_mean = gfn_trajs[:, :, 6 + j].mean(axis=0)
+        ax.plot(gfn_time_axis, gfn_mean,
+                color="darkorange", lw=1.4, alpha=0.9,
+                label=f"GFN mean (N={gfn_trajs.shape[0]} samples)")
     ax.axhline(dq_target[j], color="green", ls="--", lw=1.4,
                label=f"target dq_ref(4s) = {dq_target[j]:.2f}")
     ax.axhline(0.0, color="blue", ls=":", lw=1.0, alpha=0.5,
                label="initial = 0")
     if n_hist > 0:
         ax.plot(t_axis[:len(states_hist[0])], states_hist[0][:, 6 + j],
-                color="gray", lw=1.0, alpha=0.5, label="exploration")
+                color="gray", lw=1.0, alpha=0.55, label="exploration")
     if n_hist > 1:
         ax.plot(t_axis[:len(states_hist[1])], states_hist[1][:, 6 + j],
-                color="crimson", lw=1.5, label=f"policy trial {n_hist-1}")
+                color="crimson", lw=1.6, label=f"policy trial {n_hist-1}")
     ax.set_title(f"dq[{j}]  {JOINT_NAMES[j]}", fontsize=9)
     ax.set_ylabel("rad/s")
     if j >= 3:
         ax.set_xlabel("Time (s)")
     ax.grid(True, alpha=0.3)
     if j == 0:
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=6, loc="best")
 plt.tight_layout()
 savefig(fig, "03_joint_velocities.png")
 
