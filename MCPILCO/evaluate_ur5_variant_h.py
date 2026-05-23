@@ -118,6 +118,116 @@ JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow",
                "wrist_1", "wrist_2", "wrist_3"]
 
 
+# ---------------------------------------------------------------------------
+# Sample GFN trajectories so we can overlay them in YELLOW on the joint plots.
+# Returns array of shape [n_samples, T_gfn+1, 12] and the time axis
+# in physical seconds (linearly mapped from diffusion time).
+# ---------------------------------------------------------------------------
+def sample_gfn_trajectories(n_samples=20, gfn_ckpt_path=None,
+                            T_control_seconds=4.0):
+    import torch
+
+    if gfn_ckpt_path is None:
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        gfn_ckpt_path = str(
+            repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+            / 'ur5_denoising_theta_step25000.pt')
+
+    if not pathlib.Path(gfn_ckpt_path).exists():
+        print(f"  [WARN] GFN checkpoint not found at {gfn_ckpt_path}; "
+              f"skipping GFN trace overlay.")
+        return None, None, None, None
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    gfn_dir = repo_root / 'GflowNet' / 'gfn-diffusion' / 'energy_sampling'
+    if (gfn_dir / 'models' / 'gfn.py').exists():
+        if str(gfn_dir) not in sys.path:
+            sys.path.insert(0, str(gfn_dir))
+    else:
+        print(f"  [WARN] GflowNet package not at {gfn_dir}; "
+              f"skipping GFN trace overlay.")
+        return None, None, None, None
+
+    from models.gfn import GFN
+    device = torch.device('cpu')
+
+    gfn_model = GFN(
+        dim=12, s_emb_dim=64, hidden_dim=64,
+        harmonics_dim=64, t_dim=64, log_var_range=4.0,
+        t_scale=5.0, learned_variance=True, partial_energy=False,
+        clipping=True, lgv_clip=1e2, gfn_clip=1e4,
+        pb_scale_range=0.1, learn_pb=True, device=device,
+        langevin_scaling_per_dimension=False,
+    ).to(device)
+
+    ckpt = torch.load(gfn_ckpt_path, map_location=device, weights_only=False)
+    state = ckpt.get('model_state_dict', ckpt)
+    gfn_model.load_state_dict(state)
+    gfn_model.eval()
+    for prm in gfn_model.parameters():
+        prm.requires_grad_(False)
+
+    mu_t = torch.tensor(ckpt.get('mu',
+            [0.1884, -1.9495, 2.0472, -1.7108, -1.6774, 0.0,
+             -0.5045, -0.0036, 0.0162, 0.0, 0.0921, 0.0]),
+                       dtype=torch.float32, device=device)
+    sigma_t = torch.tensor(ckpt.get('sigma',
+            [0.10] * 6 + [0.50] * 6),
+                          dtype=torch.float32, device=device)
+
+    def log_reward(x, condition=None):
+        return -0.5 * ((x - mu_t) ** 2 / sigma_t ** 2).sum(dim=-1)
+
+    with torch.no_grad():
+        init_state = torch.zeros(n_samples, 12,
+                                 dtype=torch.float32, device=device)
+        states, _, _, _ = gfn_model.get_trajectory_fwd(
+            init_state, None, log_reward)
+    trajs = states.cpu().numpy()                # [n_samples, T_gfn+1, 12]
+    T_gfn_plus_1 = trajs.shape[1]
+    gfn_time_axis = np.linspace(0.0, T_control_seconds, T_gfn_plus_1)
+    return trajs, gfn_time_axis, mu_t.cpu().numpy(), sigma_t.cpu().numpy()
+
+
+# ---------------------------------------------------------------------------
+# Start/End alignment check between Variant H rollout and GFN diffusion
+# ---------------------------------------------------------------------------
+print(f"\nSampling {args.n_gfn_samples} GFN trajectories for overlay ...")
+gfn_trajs, gfn_time_axis, gfn_mu_t, gfn_sigma_t = sample_gfn_trajectories(
+    n_samples=args.n_gfn_samples,
+    gfn_ckpt_path=args.gfn_checkpoint,
+    T_control_seconds=T_control,
+)
+
+print("\n" + "=" * 78)
+print("START / END ALIGNMENT CHECK   (Variant H vs GFN diffusion)")
+print("=" * 78)
+print(f"Variant H initial state q_ref[0]  (joints):  "
+      f"[{', '.join(f'{x:+.4f}' for x in q_ref[0])}]")
+print(f"Variant H terminal     q_ref[-1] (joints):  "
+      f"[{', '.join(f'{x:+.4f}' for x in q_ref[-1])}]")
+if gfn_mu_t is not None:
+    print(f"GFN initial            (zeros)            :  "
+          f"[{', '.join(f'{0.0:+.4f}' for _ in range(6))}]")
+    print(f"GFN terminal target mu_t (joints)         :  "
+          f"[{', '.join(f'{x:+.4f}' for x in gfn_mu_t[:6])}]")
+    # Quantitative match
+    d_start_h_vs_gfn = float(np.linalg.norm(q_ref[0] - 0.0))
+    d_end_h_vs_gfn   = float(np.linalg.norm(q_ref[-1] - gfn_mu_t[:6]))
+    d_circle_close   = float(np.linalg.norm(q_ref[0] - q_ref[-1]))
+    print(f"\n||q_ref[0]  - GFN_start (zeros)|| = {d_start_h_vs_gfn:.4f} rad "
+          f"({'MISMATCH (expected -- H starts at home pose, not zeros)' if d_start_h_vs_gfn > 0.1 else 'aligned'})")
+    print(f"||q_ref[-1] - GFN_mu_t          || = {d_end_h_vs_gfn:.4f} rad "
+          f"({'aligned (circle endpoint == GFN target)' if d_end_h_vs_gfn < 0.05 else 'MISMATCH'})")
+    print(f"||q_ref[0]  - q_ref[-1]         || = {d_circle_close:.4f} rad "
+          f"({'closed loop' if d_circle_close < 0.05 else 'OPEN loop'})")
+print("=" * 78)
+
+if gfn_trajs is not None:
+    print(f"GFN traj shape: {gfn_trajs.shape}  "
+          f"(samples x diffusion-steps x state-dim)")
+
+
 def savefig(fig, name):
     path = save_dir / name
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -174,11 +284,29 @@ else:
 print("[2] Joint positions ...")
 fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=True)
 axes = axes.flatten()
-fig.suptitle(f"UR5 Variant H -- joint positions (rollout {trial_idx})",
-             fontsize=12, fontweight="bold")
+fig.suptitle(f"UR5 Variant H -- joint positions (rollout {trial_idx})  "
+             f"-- yellow = GFN samples (start: zeros, end: mu_t)",
+             fontsize=11, fontweight="bold")
 roll = states_hist[trial_idx]
 for j in range(6):
     ax = axes[j]
+    # --- yellow GFN sample overlay -----------------------------------------
+    if gfn_trajs is not None:
+        for k in range(gfn_trajs.shape[0]):
+            ax.plot(gfn_time_axis, gfn_trajs[k, :, j],
+                    color="gold", alpha=0.20, lw=0.8)
+        gfn_mean = gfn_trajs[:, :, j].mean(axis=0)
+        ax.plot(gfn_time_axis, gfn_mean,
+                color="goldenrod", lw=1.5, alpha=0.95,
+                label=f"GFN mean (N={gfn_trajs.shape[0]})")
+        # mark GFN start (zeros) and GFN terminal (mu_t)
+        ax.scatter([0.0], [0.0],            c="gold",     s=55, marker="o",
+                   edgecolors="black", linewidths=0.6, zorder=5,
+                   label="GFN start = 0")
+        ax.scatter([T_control], [gfn_mu_t[j]], c="goldenrod", s=70, marker="*",
+                   edgecolors="black", linewidths=0.6, zorder=5,
+                   label="GFN target mu_t")
+    # --- Variant H reference + rollout -------------------------------------
     ax.plot(t_axis, q_ref[:, j], color="green", ls="--", lw=1.4,
             label="ref q_ref(t)")
     ax.plot(t_axis[:len(roll)], roll[:, j],
@@ -191,7 +319,7 @@ for j in range(6):
         ax.set_xlabel("Time (s)")
     ax.grid(True, alpha=0.3)
     if j == 0:
-        ax.legend(fontsize=6)
+        ax.legend(fontsize=6, loc="best")
 plt.tight_layout()
 savefig(fig, "02_joint_positions.png")
 
@@ -202,10 +330,27 @@ savefig(fig, "02_joint_positions.png")
 print("[3] Joint velocities ...")
 fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=True)
 axes = axes.flatten()
-fig.suptitle(f"UR5 Variant H -- joint velocities (rollout {trial_idx})",
-             fontsize=12, fontweight="bold")
+fig.suptitle(f"UR5 Variant H -- joint velocities (rollout {trial_idx})  "
+             f"-- yellow = GFN samples",
+             fontsize=11, fontweight="bold")
 for j in range(6):
     ax = axes[j]
+    # --- yellow GFN sample overlay (velocity dims = 6+j) -------------------
+    if gfn_trajs is not None:
+        for k in range(gfn_trajs.shape[0]):
+            ax.plot(gfn_time_axis, gfn_trajs[k, :, 6 + j],
+                    color="gold", alpha=0.20, lw=0.8)
+        gfn_mean = gfn_trajs[:, :, 6 + j].mean(axis=0)
+        ax.plot(gfn_time_axis, gfn_mean,
+                color="goldenrod", lw=1.5, alpha=0.95,
+                label=f"GFN mean (N={gfn_trajs.shape[0]})")
+        ax.scatter([0.0], [0.0],                  c="gold",      s=55, marker="o",
+                   edgecolors="black", linewidths=0.6, zorder=5,
+                   label="GFN start = 0")
+        ax.scatter([T_control], [gfn_mu_t[6 + j]], c="goldenrod", s=70, marker="*",
+                   edgecolors="black", linewidths=0.6, zorder=5,
+                   label="GFN target mu_t")
+    # --- Variant H reference + rollout -------------------------------------
     ax.plot(t_axis, dq_ref[:, j], color="green", ls="--", lw=1.4,
             label="ref dq_ref(t)")
     ax.plot(t_axis[:len(roll)], roll[:, 6 + j],
@@ -216,7 +361,7 @@ for j in range(6):
         ax.set_xlabel("Time (s)")
     ax.grid(True, alpha=0.3)
     if j == 0:
-        ax.legend(fontsize=6)
+        ax.legend(fontsize=6, loc="best")
 plt.tight_layout()
 savefig(fig, "03_joint_velocities.png")
 
