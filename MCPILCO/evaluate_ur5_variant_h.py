@@ -199,28 +199,51 @@ gfn_trajs, gfn_time_axis, gfn_mu_t, gfn_sigma_t = sample_gfn_trajectories(
     T_control_seconds=T_control,
 )
 
+# Try to read the ACTUAL initial state from the saved config snapshot.
+# Falls back to q_ref[0] only if the config isn't present (older runs).
+_cfg_path = log_path.parent / "config_log.pkl"
+_h_initial_q  = None
+_h_initial_dq = None
+if _cfg_path.exists():
+    try:
+        with open(_cfg_path, "rb") as _cf:
+            _cfg = pkl.load(_cf)
+        _init_state = np.asarray(_cfg["reinforce_param_dict"]["initial_state"])
+        _h_initial_q  = _init_state[:6]
+        _h_initial_dq = _init_state[6:]
+        print(f"[align] read MC-PILCO initial state from {_cfg_path.name}")
+    except Exception as _e:
+        print(f"[align] config_log.pkl present but unreadable ({_e}); "
+              f"falling back to q_ref[0]")
+if _h_initial_q is None:
+    _h_initial_q  = q_ref[0]
+    _h_initial_dq = dq_ref[0]
+    print(f"[align] no config_log.pkl -- assuming initial state = q_ref[0]")
+
 print("\n" + "=" * 78)
 print("START / END ALIGNMENT CHECK   (Variant H vs GFN diffusion)")
 print("=" * 78)
-print(f"Variant H initial state q_ref[0]  (joints):  "
-      f"[{', '.join(f'{x:+.4f}' for x in q_ref[0])}]")
-print(f"Variant H terminal     q_ref[-1] (joints):  "
+print(f"MC-PILCO H initial state (q)  :  "
+      f"[{', '.join(f'{x:+.4f}' for x in _h_initial_q)}]")
+print(f"MC-PILCO H terminal target q_ref[-1]:  "
       f"[{', '.join(f'{x:+.4f}' for x in q_ref[-1])}]")
 if gfn_mu_t is not None:
-    print(f"GFN initial            (zeros)            :  "
+    print(f"GFN initial (zeros)           :  "
           f"[{', '.join(f'{0.0:+.4f}' for _ in range(6))}]")
-    print(f"GFN terminal target mu_t (joints)         :  "
+    print(f"GFN terminal target mu_t      :  "
           f"[{', '.join(f'{x:+.4f}' for x in gfn_mu_t[:6])}]")
-    # Quantitative match
-    d_start_h_vs_gfn = float(np.linalg.norm(q_ref[0] - 0.0))
+    d_start_h_vs_gfn = float(np.linalg.norm(_h_initial_q - 0.0))
     d_end_h_vs_gfn   = float(np.linalg.norm(q_ref[-1] - gfn_mu_t[:6]))
     d_circle_close   = float(np.linalg.norm(q_ref[0] - q_ref[-1]))
-    print(f"\n||q_ref[0]  - GFN_start (zeros)|| = {d_start_h_vs_gfn:.4f} rad "
-          f"({'MISMATCH (expected -- H starts at home pose, not zeros)' if d_start_h_vs_gfn > 0.1 else 'aligned'})")
-    print(f"||q_ref[-1] - GFN_mu_t          || = {d_end_h_vs_gfn:.4f} rad "
+    d_start_to_ref0  = float(np.linalg.norm(_h_initial_q - q_ref[0]))
+    print(f"\n||MC-PILCO H init - GFN_start (zeros)|| = {d_start_h_vs_gfn:.4f} rad "
+          f"({'aligned (Option B: both start at zeros)' if d_start_h_vs_gfn < 0.05 else 'MISMATCH (H init is NOT zeros)'})")
+    print(f"||q_ref[-1]       - GFN_mu_t        || = {d_end_h_vs_gfn:.4f} rad "
           f"({'aligned (circle endpoint == GFN target)' if d_end_h_vs_gfn < 0.05 else 'MISMATCH'})")
-    print(f"||q_ref[0]  - q_ref[-1]         || = {d_circle_close:.4f} rad "
+    print(f"||q_ref[0]        - q_ref[-1]       || = {d_circle_close:.4f} rad "
           f"({'closed loop' if d_circle_close < 0.05 else 'OPEN loop'})")
+    print(f"||MC-PILCO H init - q_ref[0]        || = {d_start_to_ref0:.4f} rad "
+          f"({'tracks from t=0' if d_start_to_ref0 < 0.05 else 'INSTANT-TELEPORT gap at t=0 (Option B caveat)'})")
 print("=" * 78)
 
 if gfn_trajs is not None:

@@ -15,9 +15,17 @@ Key differences from Variant G:
     GFN sigma) -- target is the IK waypoint at time t_k, not a fixed
     terminal pose.
   * Weighting: UNIFORM (default). Every step contributes equally.
-  * Initial state: q_ref[0] (start of circle) -- consistent with the
-    closed-loop trajectory. Circle start == circle end so the GFN's
-    terminal alignment still holds at step N_h.
+  * Initial state: ZEROS -- aligned with the GFN's diffusion prior so
+    that both ends of the trajectory match the GFN distribution:
+        start ~ N(0, eps)  ==  GFN init (zeros)
+        end   ~ q_ref[-1]  ==  GFN target mu_t  (closed circle)
+    NOTE: starting at zeros (arm straight up) means the reference
+    target q_ref(t_0) is ~2.8 rad away at step 0. The policy must
+    drive the arm from zeros to q_ref[0] essentially instantly, which
+    is physically impossible -- expect a large per-step cost at the
+    very first step. If that turns out to be the dominant signal,
+    consider switching to --weighting linear so early-step cost is
+    de-emphasised, or extending q_ref with a lift-in phase from zeros.
   * Optional 1-step BPTT (--bptt 1) via MC_PILCO_Local for truly
     BPTT-free policy gradients.
 
@@ -122,9 +130,24 @@ t_arr, q_ref, dq_ref, ee_ref = generate_circle_trajectory(
 print(f"Reference: {q_ref.shape[0]} waypoints, "
       f"end-effector circle radius 0.15 m around (-0.6, 0, 0.4)")
 
-q_home  = q_ref[0]
-dq_home = dq_ref[0]
+# ---------------------------------------------------------------------------
+# Initial state -- ZEROS to match the GFN diffusion prior (Option B).
+# GFN samples its forward trajectory starting from torch.zeros(n, 12), so
+# aligning MC-PILCO's initial state with zeros makes the START of the two
+# distributions coincide. The END already coincides because the IK circle
+# is closed: q_ref[-1] == q_ref[0], which was used as mu_t during GFN
+# training. See module docstring for the physical-reachability caveat.
+# ---------------------------------------------------------------------------
+q_home  = np.zeros(6)
+dq_home = np.zeros(6)
 initial_state_mean = np.concatenate([q_home, dq_home])
+
+# Distance from the zero-start to the first reference waypoint -- printed
+# so the user can see at a glance how large the "instant teleport" gap is.
+_d_start_to_ref0 = float(np.linalg.norm(q_ref[0] - q_home))
+print(f"[variant_h] initial state = zeros (aligned with GFN diffusion prior)")
+print(f"[variant_h] ||zeros - q_ref[0]|| = {_d_start_to_ref0:.3f} rad "
+      f"(the gap policy must close in 1 step at t=0)")
 
 # ---------------------------------------------------------------------------
 # Model learning params
