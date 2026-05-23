@@ -339,14 +339,27 @@ if log_file.exists() and not args.fresh:
             print(f"[resume] Already have {n_completed} trials (>= "
                   f"requested {num_trials_requested}). Nothing to do.")
             sys.exit(0)
-        if n_completed > 0:
-            PL_obj.load_model_from_log(num_trial=n_completed,
+
+        # load_model_from_log(num_trial=N) iterates
+        #     for j in range(N + 1): state_samples_history[j]
+        # so it needs n_real >= n_completed + 1.  If the process was
+        # killed between saving cost_trial_list (after policy opt) and
+        # saving the next rollout, n_real can lag behind.  Clamp to
+        # the maximum that load_model_from_log can actually handle.
+        n_loadable = min(n_completed, max(n_real - 1, 0))
+        if n_loadable != n_completed:
+            print(f"[resume] WARNING: cost_trial_list has {n_completed} "
+                  f"entries but state_samples_history has only {n_real}. "
+                  f"Clamping to {n_loadable} loadable trials.")
+
+        if n_loadable > 0:
+            PL_obj.load_model_from_log(num_trial=n_loadable,
                                        folder=str(log_dir) + "/")
-            resume_from = n_completed
-            print(f"[resume] Loaded state through trial {n_completed}; "
-                  f"will run {num_trials_requested - n_completed} more.")
+            resume_from = n_loadable
+            print(f"[resume] Loaded state through trial {n_loadable}; "
+                  f"will run {num_trials_requested - n_loadable} more.")
         else:
-            print(f"[resume] Existing log has no completed trials -- "
+            print(f"[resume] Existing log has no loadable trials -- "
                   f"starting fresh.")
     except Exception as e:
         print(f"[resume] WARNING: failed to load log ({e}); starting fresh.")
@@ -416,7 +429,15 @@ with open(log_dir / "config_log.pkl", "wb") as f:
 # Snapshot helper -- can be called from anywhere to force a save NOW.
 # ---------------------------------------------------------------------------
 def _snapshot(reason=""):
-    """Write whatever the PL_obj currently has to log.pkl, atomically."""
+    """Write whatever the PL_obj currently has to log.pkl, atomically.
+
+    Uses _orig_pkl_dump (the REAL pickle.dump) directly -- NOT the
+    monkey-patched version.  _snapshot already does its own atomic
+    tmp-write -> flush -> fsync -> os.replace cycle, so routing through
+    the monkey-patch would double-wrap: the patch closes the file handle
+    we opened here, then _snapshot tries to flush the dead handle and
+    crashes with 'ValueError: flush of closed file'.
+    """
     if not hasattr(PL_obj, "log_dict"):
         return
     PL_obj.log_dict["state_samples_history"]    = PL_obj.state_samples_history
@@ -424,7 +445,7 @@ def _snapshot(reason=""):
     PL_obj.log_dict["noiseless_states_history"] = PL_obj.noiseless_states_history
     tmp = str(log_file_abs) + ".tmp"
     with open(tmp, "wb") as f:
-        pkl.dump(PL_obj.log_dict, f)
+        _orig_pkl_dump(PL_obj.log_dict, f)   # bypass monkey-patch
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, str(log_file_abs))
