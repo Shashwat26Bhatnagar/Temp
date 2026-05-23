@@ -226,6 +226,50 @@ log_dir  = pathlib.Path(args.results_root) / f"{seed}"
 log_file = log_dir / "log.pkl"
 log_dir.mkdir(parents=True, exist_ok=True)
 
+# Resolve to absolute path so the user can find files irrespective of CWD.
+log_dir_abs  = log_dir.resolve()
+log_file_abs = log_file.resolve()
+print(f"\n[variant_h] CWD            : {pathlib.Path.cwd()}")
+print(f"[variant_h] log_dir (rel)  : {log_dir}")
+print(f"[variant_h] log_dir (abs)  : {log_dir_abs}")
+print(f"[variant_h] log_file (abs) : {log_file_abs}")
+
+# ---------------------------------------------------------------------------
+# SAFE-SAVE PATCH
+# Replace MC_PILCO's fragile `pkl.dump(d, open(...))` with an atomic
+# write-then-rename that explicitly closes/flushes/fsyncs the temp file.
+# Otherwise a SIGKILL from the cluster scheduler between truncation and
+# GC-driven close can leave log.pkl empty or absent.
+# ---------------------------------------------------------------------------
+import policy_learning.MC_PILCO as _MC_PILCO_module
+_orig_pkl_dump = _MC_PILCO_module.pkl.dump
+
+def _safe_pkl_dump(obj, file_obj, *a, **kw):
+    """If file_obj came from open(path,'wb'), do an atomic write instead."""
+    try:
+        path = getattr(file_obj, "name", None)
+        if isinstance(path, str) and file_obj.mode == "wb":
+            tmp_path = path + ".tmp"
+            # close the file handle MC_PILCO opened; we replace it
+            try:
+                file_obj.close()
+            except Exception:
+                pass
+            with open(tmp_path, "wb") as tmp_f:
+                _orig_pkl_dump(obj, tmp_f, *a, **kw)
+                tmp_f.flush()
+                os.fsync(tmp_f.fileno())
+            os.replace(tmp_path, path)        # atomic on POSIX
+            print(f"[safe_save] wrote {path} ({os.path.getsize(path)} bytes)")
+            return
+    except Exception as e:
+        print(f"[safe_save] WARNING: atomic write failed ({e}); "
+              f"falling back to direct dump.")
+    _orig_pkl_dump(obj, file_obj, *a, **kw)
+
+_MC_PILCO_module.pkl.dump = _safe_pkl_dump
+print("[variant_h] safe-save patch active (atomic write + flush + fsync).")
+
 print("\n---- Init policy learning object ----")
 MC_PILCO_init_dict = dict(
     T_sampling=T_sampling,
@@ -346,10 +390,48 @@ with open(log_dir / "config_log.pkl", "wb") as f:
     pkl.dump(config_log_dict, f)
 
 # ---------------------------------------------------------------------------
+# Snapshot helper -- can be called from anywhere to force a save NOW.
+# ---------------------------------------------------------------------------
+def _snapshot(reason=""):
+    """Write whatever the PL_obj currently has to log.pkl, atomically."""
+    if not hasattr(PL_obj, "log_dict"):
+        return
+    PL_obj.log_dict["state_samples_history"]    = PL_obj.state_samples_history
+    PL_obj.log_dict["input_samples_history"]    = PL_obj.input_samples_history
+    PL_obj.log_dict["noiseless_states_history"] = PL_obj.noiseless_states_history
+    tmp = str(log_file_abs) + ".tmp"
+    with open(tmp, "wb") as f:
+        pkl.dump(PL_obj.log_dict, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, str(log_file_abs))
+    print(f"[snapshot] {reason} -> {log_file_abs} "
+          f"({os.path.getsize(log_file_abs)} bytes)")
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 print(f"\n[variant_h] Starting reinforce() with "
       f"num_trials={reinforce_param_dict['num_trials']}, "
       f"loaded_model={reinforce_param_dict['loaded_model']}")
-PL_obj.reinforce(**reinforce_param_dict)
-print(f"\n[variant_h] Done. Log saved to {log_file}")
+
+# Monkey-patch get_data_from_system so we snapshot right after exploration
+# (the longest blind window in the run -- minutes of MuJoCo before any GP).
+_orig_get_data = PL_obj.get_data_from_system
+def _get_data_with_snapshot(*a, **kw):
+    out = _orig_get_data(*a, **kw)
+    _snapshot(reason=f"after rollout (trial_index={kw.get('trial_index','?')}, "
+                     f"exploration={kw.get('flg_exploration','?')})")
+    return out
+PL_obj.get_data_from_system = _get_data_with_snapshot
+
+try:
+    PL_obj.reinforce(**reinforce_param_dict)
+finally:
+    # Always try one final save -- even if reinforce() raised.
+    try:
+        _snapshot(reason="final (post-reinforce or post-exception)")
+    except Exception as e:
+        print(f"[snapshot] final save FAILED: {e}")
+
+print(f"\n[variant_h] Done. Log saved to {log_file_abs}")
