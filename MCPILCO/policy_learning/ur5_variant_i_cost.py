@@ -92,6 +92,9 @@ class UR5_VariantI_Cost:
         sigma_p_dq:      per-velocity-dim sigma (default: GFN-trained 0.50)
         n_p_samples:     number of samples from p for estimating KL(p||M).
                          More samples = less variance in gradient, but slower.
+        beta:            weight on action regularisation (default 0.0 = off).
+        u_max:           per-joint torque limits [6] for normalising action
+                         penalty. If None, no normalisation (raw u^2).
         q_min, q_max:    UR5 joint limits (rad)
     """
 
@@ -106,6 +109,8 @@ class UR5_VariantI_Cost:
                  sigma_p_q=None,
                  sigma_p_dq=None,
                  n_p_samples=50,
+                 beta=0.0,
+                 u_max=None,
                  q_min=UR5_Q_MIN_DEFAULT,
                  q_max=UR5_Q_MAX_DEFAULT,
                  num_ref_samples=512,
@@ -115,6 +120,7 @@ class UR5_VariantI_Cost:
             f"Unknown weighting '{weighting}'."
 
         self.alpha       = alpha
+        self.beta        = beta
         self.epsilon     = epsilon
         self.weighting   = weighting
         self.n_p_samples = n_p_samples
@@ -122,6 +128,12 @@ class UR5_VariantI_Cost:
         self.q_max       = q_max
         self.dtype       = dtype
         self.device      = device
+
+        # Action normalisation
+        if u_max is not None:
+            self.u_max = torch.as_tensor(u_max, dtype=dtype, device=device)
+        else:
+            self.u_max = None
 
         self.gfn_prior = UR5GFNPrior(
             checkpoint_path=checkpoint_path,
@@ -145,24 +157,30 @@ class UR5_VariantI_Cost:
         self.last_jsd_per_step   = None
         self.last_kl_q_m         = None
         self.last_kl_p_m         = None
+        self.last_action_per_step = None
         self.last_slack_per_step = None
         self.last_weights        = None
         self.last_mu_p_traj      = None
 
         print(f"[UR5_VariantI_Cost] LOCAL per-step JSD "
-              f"(time-varying target) | alpha={alpha} epsilon={epsilon} "
-              f"weighting='{weighting}' n_p_samples={n_p_samples}")
+              f"(time-varying target) | alpha={alpha} beta={beta} "
+              f"epsilon={epsilon} weighting='{weighting}' "
+              f"n_p_samples={n_p_samples}")
         print(f"[UR5_VariantI_Cost] sigma_p (positions, rad):  "
               f"{self.sigma_p[:6].tolist()}")
         print(f"[UR5_VariantI_Cost] sigma_p (velocities, rad/s): "
               f"{self.sigma_p[6:].tolist()}")
+        if self.beta > 0:
+            print(f"[UR5_VariantI_Cost] ACTION PENALTY active: "
+                  f"beta={self.beta}, "
+                  f"u_max={self.u_max.tolist() if self.u_max is not None else 'None (raw u^2)'}")
 
     # ------------------------------------------------------------------ #
     def cost_function(self, states_sequence, inputs_sequence, trial_index):
         """
         Args:
             states_sequence: [N_h+1, num_particles, 12]
-            inputs_sequence: [N_h+1, num_particles, 6]   (unused)
+            inputs_sequence: [N_h+1, num_particles, 6]
             trial_index:     int
 
         Returns:
@@ -284,9 +302,25 @@ class UR5_VariantI_Cost:
         )
 
         # =========================================================
-        # 6) Total cost per step
+        # 6) Action regularisation
         # =========================================================
-        cost_per_step = weighted_jsd_per_step + self.alpha * slack_per_step
+        if self.beta > 0 and inputs_sequence is not None:
+            u = inputs_sequence                                    # [N_h+1, P, 6]
+            if self.u_max is not None:
+                u_normalised = u / self.u_max.to(dtype=dtype, device=device)
+            else:
+                u_normalised = u
+            action_per_step = (u_normalised ** 2).sum(dim=-1).mean(dim=1)
+        else:
+            action_per_step = torch.zeros(N_h_plus_1,
+                                          dtype=dtype, device=device)
+
+        # =========================================================
+        # 7) Total cost per step
+        # =========================================================
+        cost_per_step = (weighted_jsd_per_step
+                         + self.alpha * slack_per_step
+                         + self.beta  * action_per_step)
         cost_per_step = torch.nan_to_num(cost_per_step,
                                          nan=1e8, posinf=1e8, neginf=0.0)
         cost_per_step = torch.clamp(cost_per_step, max=1e8)
@@ -295,6 +329,7 @@ class UR5_VariantI_Cost:
         self.last_jsd_per_step   = jsd_per_step.detach()
         self.last_kl_q_m         = kl_q_m.detach()
         self.last_kl_p_m         = kl_p_m.detach()
+        self.last_action_per_step = action_per_step.detach()
         self.last_slack_per_step = slack_per_step.detach()
         self.last_weights        = weights.detach()
         self.last_mu_p_traj      = mu_p_traj.detach()

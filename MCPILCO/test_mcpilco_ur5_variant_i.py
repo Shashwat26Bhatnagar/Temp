@@ -82,6 +82,9 @@ parser.add_argument("--fresh", action="store_true",
                     help="Ignore existing log.pkl and start over.")
 parser.add_argument("--weighting", type=str, default="uniform",
                     choices=["uniform", "linear", "quadratic"])
+parser.add_argument("--beta", type=float, default=0.0,
+                    help="Action regularisation weight. 0 = off. "
+                         "Try 0.01-1.0 to penalise large torques.")
 parser.add_argument("--n_p_samples", type=int, default=50,
                     help="Number of samples from p for estimating KL(p||M) "
                          "in JSD. More = less gradient variance, slower.")
@@ -238,6 +241,8 @@ cost_function_par = dict(
     sigma_p_q=None,    # use GFN-trained 0.10
     sigma_p_dq=None,   # use GFN-trained 0.50
     n_p_samples=args.n_p_samples,
+    beta=args.beta,
+    u_max=tuple(u_max),
     q_min=tuple(ur5_env.q_min), q_max=tuple(ur5_env.q_max),
     dtype=dtype, device=device,
 )

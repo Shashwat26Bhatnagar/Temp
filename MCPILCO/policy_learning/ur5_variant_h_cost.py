@@ -14,11 +14,17 @@ has dense data but the target is unreachable.
 Variant H replaces the cost with:
     L = sum_k w_k * (1/P) sum_i (1/2) * || x_k^i - mu_ref(t_k) ||^2_{Sigma^-1}
       + alpha * sum_k slack_k
+      + beta  * sum_k (1/P) sum_i || u_k^i / u_max ||^2
 where:
     mu_ref(t_k) = time-varying IK waypoint at step k  (locally reachable)
     Sigma       = diag(sigma_p^2),   sigma_p from the GFN training
     w_k         = 1 (uniform)  by default;  'linear' or 'quadratic' available
     slack_k     = soft chance-constraint slack at step k
+    beta        = action regularisation weight (default 0; set >0 to penalise
+                  large torques and prevent free-fall / bang-bang behaviour)
+    u_max       = per-joint torque limits used to normalise the action penalty
+                  so joints with different scales (150 N·m vs 28 N·m) are
+                  penalised equally in proportion
 
 Why this works (and why no sigma_q in denominator):
   * Each step k has a target that is reachable from step k-1 in one
@@ -68,6 +74,12 @@ class UR5_VariantH_Cost:
                          If None, uses the GFN-trained value (0.10 rad).
                          Tighten (e.g., 0.05) for stricter tracking.
         sigma_p_dq:      per-velocity-dim sigma. If None, GFN-trained 0.50.
+        beta:            weight on action regularisation (default 0.0 = off).
+                         Penalises (u/u_max)^2 per joint per step so the
+                         optimizer prefers smaller torques. Prevents free-fall
+                         and bang-bang control.
+        u_max:           per-joint torque limits [6] for normalising the
+                         action penalty. If None, no normalisation (raw u^2).
         q_min, q_max:    UR5 joint limits (rad)
     """
 
@@ -81,6 +93,8 @@ class UR5_VariantH_Cost:
                  weighting='uniform',
                  sigma_p_q=None,
                  sigma_p_dq=None,
+                 beta=0.0,
+                 u_max=None,
                  q_min=UR5_Q_MIN_DEFAULT,
                  q_max=UR5_Q_MAX_DEFAULT,
                  num_ref_samples=512,
@@ -90,12 +104,20 @@ class UR5_VariantH_Cost:
             f"Unknown weighting '{weighting}'."
 
         self.alpha     = alpha
+        self.beta      = beta
         self.epsilon   = epsilon
         self.weighting = weighting
         self.q_min     = q_min
         self.q_max     = q_max
         self.dtype     = dtype
         self.device    = device
+
+        # Action normalisation: if u_max is provided, the action penalty is
+        # sum_j (u_j / u_max_j)^2 so each joint contributes ~1 at full torque.
+        if u_max is not None:
+            self.u_max = torch.as_tensor(u_max, dtype=dtype, device=device)
+        else:
+            self.u_max = None
 
         self.gfn_prior = UR5GFNPrior(
             checkpoint_path=checkpoint_path,
@@ -117,24 +139,29 @@ class UR5_VariantH_Cost:
 
         # Logging buffers
         self.last_divergence_per_step = None
+        self.last_action_per_step     = None
         self.last_slack_per_step      = None
         self.last_weights             = None
         self.last_mu_p_traj           = None
 
         print(f"[UR5_VariantH_Cost] LOCAL per-step Mahalanobis "
-              f"(time-varying target) | alpha={alpha} epsilon={epsilon} "
-              f"weighting='{weighting}'")
+              f"(time-varying target) | alpha={alpha} beta={beta} "
+              f"epsilon={epsilon} weighting='{weighting}'")
         print(f"[UR5_VariantH_Cost] sigma_p (positions, rad):  "
               f"{self.sigma_p[:6].tolist()}")
         print(f"[UR5_VariantH_Cost] sigma_p (velocities, rad/s): "
               f"{self.sigma_p[6:].tolist()}")
+        if self.beta > 0:
+            print(f"[UR5_VariantH_Cost] ACTION PENALTY active: "
+                  f"beta={self.beta}, "
+                  f"u_max={self.u_max.tolist() if self.u_max is not None else 'None (raw u^2)'}")
 
     # ------------------------------------------------------------------ #
     def cost_function(self, states_sequence, inputs_sequence, trial_index):
         """
         Args:
             states_sequence: [N_h+1, num_particles, 12]
-            inputs_sequence: [N_h+1, num_particles, 6]   (unused)
+            inputs_sequence: [N_h+1, num_particles, 6]
             trial_index:     int
 
         Returns:
@@ -192,15 +219,35 @@ class UR5_VariantH_Cost:
         )
 
         # =========================================================
-        # 5) Total cost per step
+        # 5) Action regularisation: beta * (1/P) sum_i ||u_k^i / u_max||^2
+        #    Penalises large torques so the optimizer prefers gentle
+        #    control over bang-bang. Normalised by u_max so all joints
+        #    contribute equally at full torque (~1 per joint).
         # =========================================================
-        cost_per_step = weighted_div_per_step + self.alpha * slack_per_step
+        if self.beta > 0 and inputs_sequence is not None:
+            u = inputs_sequence                                    # [N_h+1, P, 6]
+            if self.u_max is not None:
+                u_normalised = u / self.u_max.to(dtype=dtype, device=device)
+            else:
+                u_normalised = u
+            action_per_step = (u_normalised ** 2).sum(dim=-1).mean(dim=1)  # [N_h+1]
+        else:
+            action_per_step = torch.zeros(N_h_plus_1,
+                                          dtype=dtype, device=device)
+
+        # =========================================================
+        # 6) Total cost per step
+        # =========================================================
+        cost_per_step = (weighted_div_per_step
+                         + self.alpha * slack_per_step
+                         + self.beta  * action_per_step)
         cost_per_step = torch.nan_to_num(cost_per_step,
                                          nan=1e8, posinf=1e8, neginf=0.0)
         cost_per_step = torch.clamp(cost_per_step, max=1e8)
 
         # Logging (detached)
         self.last_divergence_per_step = divergence_per_step.detach()
+        self.last_action_per_step     = action_per_step.detach()
         self.last_slack_per_step      = slack_per_step.detach()
         self.last_weights             = weights.detach()
         self.last_mu_p_traj           = mu_p_traj.detach()
