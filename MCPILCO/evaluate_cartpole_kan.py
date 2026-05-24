@@ -39,7 +39,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
+from matplotlib.patches import Rectangle
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -415,9 +415,8 @@ if not args.no_anim:
         ax.grid(True, alpha=0.3)
         ax.axhline(0, color="gray", lw=0.5)
 
-        cart_patch = FancyBboxPatch(
+        cart_patch = Rectangle(
             (0, 0), cart_w, cart_h,
-            boxstyle="round,pad=0.02",
             facecolor="steelblue", edgecolor="black", lw=1.5)
         ax.add_patch(cart_patch)
         pole_line, = ax.plot([], [], "o-", color="crimson",
