@@ -22,6 +22,19 @@ This is a GOAL-REACHING task analogous to CartPole swing-up:
 Success = particle distribution converges to a tight Gaussian around the
 target by the end of the horizon.
 """
+# --- fix Debian dist-packages precedence over user-site mpl_toolkits ---
+import sys
+_USER_SITE = '/afs/inf.ed.ac.uk/user/s28/s2892016/.local/lib/python3.12/site-packages'
+_dist  = [p for p in sys.path if p.startswith('/usr/lib/python3/dist-packages')]
+_other = [p for p in sys.path if p not in _dist and p != _USER_SITE]
+sys.path = [_USER_SITE] + _other + _dist
+# Clear any already-cached old modules so the new path wins
+for _m in list(sys.modules):
+    if _m == 'matplotlib' or _m.startswith('matplotlib.') \
+       or _m == 'mpl_toolkits' or _m.startswith('mpl_toolkits.'):
+        del sys.modules[_m]
+
+
 
 import argparse
 import math
@@ -33,13 +46,15 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+
+
 from matplotlib.animation import FuncAnimation, PillowWriter
-# Note: do NOT explicitly `from mpl_toolkits.mplot3d import Axes3D`.
-# On systems with mixed matplotlib installs (e.g. pip-user + apt system)
-# the explicit import can fail with ModuleNotFoundError on matplotlib.tri.
-# Modern matplotlib auto-registers the '3d' projection on first use.
+# from mpl_toolkits.mplot3d import Axes3D
 
 import mujoco
+
+
 
 # -----------------------------------------------------------------------
 # CLI
@@ -173,14 +188,14 @@ def sample_gfn_trajectories(n_samples=20, gfn_ckpt_path=None,
     T_gfn_plus_1 = trajs.shape[1]
     gfn_time_axis = np.linspace(0.0, T_control_seconds, T_gfn_plus_1)
 
-    return trajs, gfn_time_axis, mu_t.cpu().numpy(), sigma_t.cpu().numpy()
+    return trajs, gfn_time_axis
 
 
 # -----------------------------------------------------------------------
 # Pre-sample GFN trajectories ONCE -- used in plots 2 and 3
 # -----------------------------------------------------------------------
 print(f"\nSampling {args.n_gfn_samples} GFN trajectories for overlay ...")
-gfn_trajs, gfn_time_axis, gfn_mu_t, gfn_sigma_t = sample_gfn_trajectories(
+gfn_trajs, gfn_time_axis = sample_gfn_trajectories(
     n_samples=args.n_gfn_samples,
     gfn_ckpt_path=args.gfn_checkpoint,
     T_control_seconds=T_control,
@@ -188,34 +203,6 @@ gfn_trajs, gfn_time_axis, gfn_mu_t, gfn_sigma_t = sample_gfn_trajectories(
 if gfn_trajs is not None:
     print(f"  GFN trajectories shape: {gfn_trajs.shape}  "
           f"(samples x diffusion-steps x state-dim)")
-
-# ---------------------------------------------------------------------------
-# Start / End alignment check for Variant G
-#   Variant G is *goal-reaching*: starts at zeros, drives toward q_ref(4s).
-#   The GFN is trained to map zeros -> mu_t. By construction these should
-#   coincide: zero-start aligned by definition, terminal aligned because
-#   mu_t was set equal to q_ref[-1] during GFN training.
-# ---------------------------------------------------------------------------
-print("\n" + "=" * 78)
-print("START / END ALIGNMENT CHECK   (Variant G vs GFN diffusion)")
-print("=" * 78)
-print(f"Variant G initial state (zeros)            :  "
-      f"[{', '.join(f'{0.0:+.4f}' for _ in range(6))}]")
-print(f"Variant G terminal target q_ref[-1] (joints):  "
-      f"[{', '.join(f'{x:+.4f}' for x in q_ref[-1])}]")
-if gfn_mu_t is not None:
-    print(f"GFN initial (zeros)                        :  "
-          f"[{', '.join(f'{0.0:+.4f}' for _ in range(6))}]")
-    print(f"GFN terminal target mu_t (joints)          :  "
-          f"[{', '.join(f'{x:+.4f}' for x in gfn_mu_t[:6])}]")
-    d_start = float(np.linalg.norm(np.zeros(6) - 0.0))   # both zero
-    d_end   = float(np.linalg.norm(q_ref[-1] - gfn_mu_t[:6]))
-    print(f"\n||VariantG_start (zeros) - GFN_start (zeros)|| = "
-          f"{d_start:.4f} rad ({'aligned (both zero)' if d_start < 0.05 else 'MISMATCH'})")
-    print(f"||VariantG_target q_ref[-1] - GFN_mu_t      || = "
-          f"{d_end:.4f} rad "
-          f"({'aligned (GFN target == circle endpoint)' if d_end < 0.05 else 'MISMATCH'})")
-print("=" * 78)
 
 
 # -----------------------------------------------------------------------
