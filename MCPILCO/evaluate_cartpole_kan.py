@@ -22,11 +22,16 @@ Usage:
     python evaluate_cartpole_kan.py -kan ... -trial 3     # specific rollout
 
 Outputs (into <save_dir>/):
-    01_cost_curves.png         Per-trial policy optimisation cost
-    02_state_trajectories.png  [p, p_dot, theta, theta_dot] vs time
-    03_swingup_metric.png      Real-system cost per timestep per trial
-    04_sample_complexity.png   Bar chart: trials to swing-up for each method
-    05_cartpole_animation.gif  Stick-figure playback (unless -no_anim)
+    01_cost_curves.png              Per-trial policy optimisation cost
+    02_theta_particles_<method>.png Theta mean+/-2sigma from GP particle rollouts
+    03_particles_trial<N>_<m>.png   Full 4-panel (theta, x, u, cost) per trial
+    04_real_trajectories_<m>.png    Real-system theta & x per rollout
+    05_progress_<method>.png        Cross-trial: cost, terminal theta, max theta
+    06_state_trajectories.png       [p, p_dot, theta, theta_dot] overlay
+    07_swingup_metric.png           Real-system cost per timestep per trial
+    08_sample_complexity.png        Bar chart: trials to swing-up (compare mode)
+    09_cartpole_animation.gif       Stick-figure playback (unless -no_anim)
+    10_learning_curves.png          Final/min cost per trial (compare mode)
 """
 
 import argparse
@@ -35,6 +40,7 @@ import pickle as pkl
 import sys
 
 import numpy as np
+import torch
 
 import matplotlib
 matplotlib.use("Agg")
@@ -226,9 +232,309 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# 2) State trajectories from real system
+# 2) Theta particle rollouts (GP model rollouts) -- one panel per trial
+#    Shows mean +/- 2*std of theta across particles, with target at pi.
 # ---------------------------------------------------------------------------
-print("[2] State trajectories ...")
+print("[2] Theta particle rollouts ...")
+for mk in method_keys:
+    log = logs[mk]
+    ps_list = log.get("particles_states_list", [])
+    n_trials_mk = len(ps_list)
+    if n_trials_mk == 0:
+        print(f"  [{mk}] skipped (no particle data).")
+        continue
+
+    n_cols = min(n_trials_mk, 5)
+    n_rows = (n_trials_mk + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(3.6 * n_cols, 3.8 * n_rows),
+                             sharey=True)
+    axes = np.atleast_1d(axes).reshape(-1)
+    fig.suptitle(f"{mk} -- theta trajectory (GP particle rollouts)\n"
+                 f"Target: theta = pi (green dashed)",
+                 fontsize=12, fontweight="bold")
+
+    for i in range(n_trials_mk):
+        ps = np.asarray(ps_list[i])          # [T, P, 4]
+        T_len, P, _ = ps.shape
+        time_ax = np.arange(T_len) * T_sampling
+
+        ax = axes[i]
+        theta = ps[:, :, 2]                  # [T, P]
+        theta_mean = theta.mean(axis=1)
+        theta_std  = theta.std(axis=1)
+
+        # Plot individual particles (thin, transparent)
+        for p_idx in range(min(P, 50)):       # cap at 50 for readability
+            ax.plot(time_ax, theta[:, p_idx],
+                    color=colours[mk], alpha=0.08, lw=0.5)
+
+        # Mean +/- 2 sigma band
+        ax.fill_between(time_ax,
+                        theta_mean - 2 * theta_std,
+                        theta_mean + 2 * theta_std,
+                        alpha=0.25, color=colours[mk], label="mean +/- 2 sigma")
+        ax.plot(time_ax, theta_mean, color=colours[mk], lw=1.8,
+                label="mean theta")
+
+        # Target
+        ax.axhline(np.pi,  color="green", ls="--", lw=1.2, label="target pi")
+        ax.axhline(-np.pi, color="green", ls="--", lw=1.2)
+        ax.axhline(0.0,    color="gray",  ls="--", lw=0.8, alpha=0.5)
+
+        final_mean = theta_mean[-1]
+        ax.set_title(f"Trial {i+1}\n"
+                     f"theta(T) = {final_mean:.3f} rad\n"
+                     f"|theta(T)-pi| = {abs(final_mean - np.pi):.3f}",
+                     fontsize=9)
+        ax.set_xlabel("Time (s)")
+        if i % n_cols == 0:
+            ax.set_ylabel("theta (rad)")
+        ax.legend(fontsize=6, loc="upper left")
+        ax.grid(True, alpha=0.3)
+
+    for j in range(n_trials_mk, len(axes)):
+        axes[j].axis("off")
+    plt.tight_layout()
+    savefig(fig, f"02_theta_particles_{mk}.png")
+
+
+# ---------------------------------------------------------------------------
+# 3) Full particle rollout panels: theta, x, force, cost per trial
+#    (same layout as log_plot_cartpole.py)
+# ---------------------------------------------------------------------------
+print("[3] Full particle rollout panels (theta, x, u, cost) ...")
+
+# Reconstruct cost function for evaluating particle cost
+def compute_particle_cost(states_seq, inputs_seq):
+    """Compute cartpole saturated cost on particle rollouts.
+    states_seq: [T, P, 4] numpy array
+    inputs_seq: [T, P, 1] numpy array
+    Returns: [T, P] numpy cost array
+    """
+    theta = states_seq[:, :, 2]
+    x     = states_seq[:, :, 0]
+    cost = 1.0 - np.exp(
+        -((np.abs(theta) - np.pi) / 3.0) ** 2
+        - ((x - 0.0) / 1.0) ** 2
+    )
+    return cost
+
+
+for mk in method_keys:
+    log = logs[mk]
+    ps_list = log.get("particles_states_list", [])
+    pi_list = log.get("particles_inputs_list", [])
+    n_trials_mk = len(ps_list)
+    if n_trials_mk == 0:
+        continue
+
+    for i in range(n_trials_mk):
+        ps = np.asarray(ps_list[i])   # [T, P, 4]
+        pi = np.asarray(pi_list[i])   # [T, P, 1]
+        T_len = ps.shape[0]
+        time_ax = np.arange(T_len) * T_sampling
+        cost = compute_particle_cost(ps, pi)  # [T, P]
+
+        fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+        fig.suptitle(f"{mk} -- GP particle rollout (trial {i+1})",
+                     fontsize=12, fontweight="bold")
+
+        # theta
+        ax = axes[0]
+        ax.plot(time_ax, ps[:, :, 2], alpha=0.15, lw=0.5, color=colours[mk])
+        ax.axhline(np.pi,  color="red", ls="--", lw=1.5)
+        ax.axhline(-np.pi, color="red", ls="--", lw=1.5)
+        ax.set_ylabel("theta (rad)")
+        ax.grid(True, alpha=0.3)
+
+        # cart position
+        ax = axes[1]
+        ax.plot(time_ax, ps[:, :, 0], alpha=0.15, lw=0.5, color=colours[mk])
+        ax.axhline(0.0, color="red", ls="--", lw=1.2)
+        ax.set_ylabel("x (m)")
+        ax.grid(True, alpha=0.3)
+
+        # force
+        ax = axes[2]
+        ax.plot(time_ax, pi[:, :, 0], alpha=0.15, lw=0.5, color=colours[mk])
+        ax.set_ylabel("u (N)")
+        ax.grid(True, alpha=0.3)
+
+        # cost
+        ax = axes[3]
+        ax.plot(time_ax, cost, alpha=0.15, lw=0.5, color=colours[mk])
+        ax.plot(time_ax, cost.mean(axis=1), color="black", lw=1.5,
+                label="mean cost")
+        ax.axhline(0.0, color="red", ls="--", lw=1.0)
+        ax.set_ylabel("cost")
+        ax.set_xlabel("Time (s)")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        savefig(fig, f"03_particles_trial{i+1}_{mk}.png")
+
+
+# ---------------------------------------------------------------------------
+# 4) Real system trajectories -- theta & x per rollout
+#    (one pair of rows per rollout: top = theta, bottom = x)
+# ---------------------------------------------------------------------------
+print("[4] Real system trajectories ...")
+for mk in method_keys:
+    log = logs[mk]
+    state_hist = log.get("state_samples_history", [])
+    input_hist = log.get("input_samples_history", [])
+    n_hist = len(state_hist)
+    if n_hist == 0:
+        continue
+
+    n_cols = min(n_hist, 6)
+    n_rows_pair = (n_hist + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(2 * n_rows_pair, n_cols,
+                             figsize=(3.2 * n_cols, 3.2 * 2 * n_rows_pair),
+                             squeeze=False)
+    fig.suptitle(f"{mk} -- real cartpole trajectories\n"
+                 f"Top: theta (rad),  Bottom: cart position (m)",
+                 fontsize=12, fontweight="bold")
+
+    for j in range(n_hist):
+        traj = np.asarray(state_hist[j])    # [T, 4]
+        T_traj = traj.shape[0]
+        time_ax = np.arange(T_traj) * T_sampling
+        label = "Exploration" if j == 0 else f"Trial {j}"
+
+        theta = traj[:, 2]
+        x_pos = traj[:, 0]
+        frac_up = np.mean(np.abs(theta - np.pi) < 0.2094) * 100
+
+        row_pair = j // n_cols
+        col = j % n_cols
+        row_theta = 2 * row_pair
+        row_x     = 2 * row_pair + 1
+
+        # theta
+        ax_th = axes[row_theta, col]
+        ax_th.plot(time_ax, theta, color=colours[mk], lw=1.5)
+        ax_th.axhline(np.pi,           color="green", ls="--", lw=1.2)
+        ax_th.axhline(np.pi + 0.2094,  color="green", ls=":",  lw=0.8)
+        ax_th.axhline(np.pi - 0.2094,  color="green", ls=":",  lw=0.8)
+        ax_th.set_title(f"{label}\ntheta in [{theta.min():.2f}, {theta.max():.2f}]\n"
+                        f"upright {frac_up:.0f}% of time", fontsize=8)
+        if col == 0:
+            ax_th.set_ylabel("theta (rad)")
+        ax_th.set_ylim(-np.pi - 0.3, np.pi + 0.8)
+        ax_th.grid(True, alpha=0.3)
+
+        # cart position
+        ax_x = axes[row_x, col]
+        ax_x.plot(time_ax, x_pos, color="darkorange", lw=1.5)
+        ax_x.axhline( 2.4, color="red", ls="--", lw=0.8, label="+/- 2.4 m")
+        ax_x.axhline(-2.4, color="red", ls="--", lw=0.8)
+        ax_x.set_xlabel("Time (s)")
+        if col == 0:
+            ax_x.set_ylabel("x (m)")
+        ax_x.set_ylim(-3, 3)
+        ax_x.grid(True, alpha=0.3)
+        if j == 0:
+            ax_x.legend(fontsize=7)
+
+    # Hide unused slots
+    for j in range(n_hist, n_rows_pair * n_cols):
+        row_pair = j // n_cols
+        col = j % n_cols
+        axes[2 * row_pair,     col].axis("off")
+        axes[2 * row_pair + 1, col].axis("off")
+
+    plt.tight_layout()
+    savefig(fig, f"04_real_trajectories_{mk}.png")
+
+
+# ---------------------------------------------------------------------------
+# 5) Cross-trial progress: cost, terminal theta, max theta
+# ---------------------------------------------------------------------------
+print("[5] Cross-trial progress ...")
+for mk in method_keys:
+    log = logs[mk]
+    ps_list = log.get("particles_states_list", [])
+    state_hist = log.get("state_samples_history", [])
+    n_trials_mk = len(ps_list)
+    n_hist = len(state_hist)
+    if n_trials_mk == 0:
+        continue
+
+    trial_nums = np.arange(1, n_trials_mk + 1)
+
+    # (a) final / min optimisation cost per trial
+    final_costs = [np.asarray(log["cost_trial_list"][i])[-1]
+                   for i in range(n_trials_mk)]
+    min_costs   = [np.asarray(log["cost_trial_list"][i]).min()
+                   for i in range(n_trials_mk)]
+
+    # (b) terminal theta from particles
+    theta_means  = []
+    theta_stds   = []
+    for i in range(n_trials_mk):
+        ps = np.asarray(ps_list[i])
+        t_final = ps[-1, :, 2]
+        theta_means.append(t_final.mean())
+        theta_stds.append(t_final.std())
+
+    # (c) max theta reached in real rollouts
+    real_theta_max = []
+    for j in range(1, n_hist):
+        traj = np.asarray(state_hist[j])
+        real_theta_max.append(traj[:, 2].max())
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig.suptitle(f"{mk} -- learning progress across trials",
+                 fontsize=12, fontweight="bold")
+
+    ax = axes[0]
+    ax.plot(trial_nums, final_costs, "o-", color=colours[mk], label="final cost")
+    ax.plot(trial_nums, min_costs, "s--", color=colours[mk],
+            alpha=0.5, label="min cost")
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("Cost")
+    ax.set_title("Policy optimisation cost")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    ax.errorbar(trial_nums, theta_means, yerr=2 * np.array(theta_stds),
+                fmt="o-", color=colours[mk], capsize=4, label="mean +/- 2 sigma")
+    ax.axhline(np.pi,          color="green", ls="--", lw=1.5,
+               label=f"target pi={np.pi:.2f}")
+    ax.axhline(np.pi - 0.2094, color="green", ls=":",  lw=0.8)
+    ax.axhline(np.pi + 0.2094, color="green", ls=":",  lw=0.8)
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("theta at terminal step (rad)")
+    ax.set_title("GP particle theta(T)")
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    if real_theta_max:
+        ax.bar(np.arange(1, len(real_theta_max) + 1), real_theta_max,
+               color=colours[mk], alpha=0.8)
+        ax.axhline(np.pi,          color="green", ls="--", lw=1.5,
+                   label="target pi")
+        ax.axhline(np.pi - 0.2094, color="green", ls=":",  lw=0.8,
+                   label="safe zone")
+        ax.set_xlabel("Trial")
+        ax.set_ylabel("max theta (rad)")
+        ax.set_title("Real system: max theta per trial")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    savefig(fig, f"05_progress_{mk}.png")
+
+
+# ---------------------------------------------------------------------------
+# 6) State trajectories overlay (comparison mode, last rollout)
+# ---------------------------------------------------------------------------
+print("[6] State trajectories overlay ...")
 fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
 axes = axes.flatten()
 title = "Cartpole -- real system rollout"
@@ -266,13 +572,13 @@ for j in range(4):
     if j >= 2:
         axes[j].set_xlabel("Time (s)")
 plt.tight_layout()
-savefig(fig, "02_state_trajectories.png")
+savefig(fig, "06_state_trajectories.png")
 
 
 # ---------------------------------------------------------------------------
-# 3) Swing-up metric: real-system cost per timestep per trial
+# 7) Swing-up metric: real-system cost per timestep per trial
 # ---------------------------------------------------------------------------
-print("[3] Swing-up metric (real-system cost) ...")
+print("[7] Swing-up metric (real-system cost) ...")
 fig, axes_grid = plt.subplots(1, len(method_keys),
                                figsize=(7 * len(method_keys), 5),
                                squeeze=False)
@@ -307,14 +613,14 @@ for col, mk in enumerate(method_keys):
     ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-savefig(fig, "03_swingup_metric.png")
+savefig(fig, "07_swingup_metric.png")
 
 
 # ---------------------------------------------------------------------------
-# 4) Sample complexity comparison (bar chart)
+# 8) Sample complexity comparison (bar chart)
 # ---------------------------------------------------------------------------
 if compare_mode:
-    print("[4] Sample complexity bar chart ...")
+    print("[8] Sample complexity bar chart ...")
     fig, ax = plt.subplots(figsize=(6, 5))
     fig.suptitle("Sample complexity: trials to swing-up",
                  fontsize=12, fontweight="bold")
@@ -380,13 +686,13 @@ if compare_mode:
                           edgecolor="gray", alpha=0.8))
 
     plt.tight_layout()
-    savefig(fig, "04_sample_complexity.png")
+    savefig(fig, "08_sample_complexity.png")
 else:
-    print("[4] Sample complexity bar chart skipped (single method).")
+    print("[8] Sample complexity bar chart skipped (single method).")
 
 
 # ---------------------------------------------------------------------------
-# 5) Cartpole animation
+# 9) Cartpole animation
 # ---------------------------------------------------------------------------
 if not args.no_anim:
     from matplotlib.animation import FuncAnimation, PillowWriter
@@ -396,7 +702,7 @@ if not args.no_anim:
     hist = logs[mk0].get("state_samples_history", [])
     n_hist = len(hist)
     if n_hist > 0:
-        print(f"[5] Cartpole animation ({mk0}) ...")
+        print(f"[9] Cartpole animation ({mk0}) ...")
         trial_idx = args.trial if args.trial >= 0 else (n_hist - 1)
         trial_idx = max(0, min(trial_idx, n_hist - 1))
         states = np.asarray(hist[trial_idx])
@@ -460,21 +766,21 @@ if not args.no_anim:
         anim = FuncAnimation(fig, update, init_func=init,
                              frames=len(frame_indices),
                              interval=50, blit=False)
-        out_path = save_dir / "05_cartpole_animation.gif"
+        out_path = save_dir / "09_cartpole_animation.gif"
         anim.save(out_path, writer=PillowWriter(fps=20))
         plt.close(fig)
         print(f"  saved -> {out_path}")
     else:
-        print("[5] No rollouts to animate.")
+        print("[9] No rollouts to animate.")
 else:
-    print("[5] Animation skipped (-no_anim).")
+    print("[9] Animation skipped (-no_anim).")
 
 
 # ---------------------------------------------------------------------------
-# 6) Learning curve overlay (final optimisation cost per trial)
+# 10) Learning curve overlay (final optimisation cost per trial)
 # ---------------------------------------------------------------------------
 if compare_mode:
-    print("[6] Learning curve overlay ...")
+    print("[10] Learning curve overlay ...")
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.suptitle("Learning curve: final optimisation cost per trial",
                  fontsize=12, fontweight="bold")
@@ -500,7 +806,7 @@ if compare_mode:
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    savefig(fig, "06_learning_curves.png")
+    savefig(fig, "10_learning_curves.png")
 
 
 # ---------------------------------------------------------------------------
