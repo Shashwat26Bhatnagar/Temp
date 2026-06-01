@@ -164,6 +164,41 @@ class UR5GFNPrior:
     def sample(self, n):
         return self._draw(n)
 
+    def get_diffusion_marginals(self, n_samples=512):
+        """
+        Sample full GFN diffusion trajectories and return per-diffusion-step
+        empirical Gaussian marginals (mean + diagonal variance), WITHOUT
+        discarding intermediate denoising steps. Used by UR5 Variant K.
+
+        CAVEAT for UR5: the Phase-1 GFN was trained only on the TERMINAL
+        target N(mu_p_final, Sigma_p) (the closed-circle endpoint). Its
+        diffusion path therefore goes zeros -> terminal pose, it does NOT
+        trace the q_ref(t) circle. So Variant K on UR5 is effectively a
+        GOAL-REACHING curriculum (zeros -> terminal pose with growing
+        tolerance), not circle tracking. For pointwise circle tracking use
+        Variant H/J (which slide mu along q_ref).
+
+        Returns:
+            mu_per_step:  [T_gfn+1, 12]
+            var_per_step: [T_gfn+1, 12]  (floored at 1e-6)
+        """
+        mu32 = self.mu_p_final.to(dtype=torch.float32).detach()
+        sigma32 = self.sigma.to(dtype=torch.float32).detach()
+
+        def log_reward(x, condition=None):
+            return -0.5 * ((x - mu32) ** 2 / sigma32 ** 2).sum(dim=-1)
+
+        with torch.no_grad():
+            init_state = torch.zeros(n_samples, self.state_dim,
+                                     dtype=torch.float32, device=self.device)
+            states, _, _, _ = self.gfn_model.get_trajectory_fwd(
+                init_state, None, log_reward)
+            # states: [n_samples, T_gfn+1, 12]
+        mu_per_step = states.mean(dim=0).to(dtype=self.dtype)
+        var_per_step = states.var(dim=0).to(dtype=self.dtype)
+        var_per_step = torch.clamp(var_per_step, min=1e-6)
+        return mu_per_step, var_per_step
+
     # ------------------------------------------------------------------ #
     # Time-varying target -- the diffusion->physical time conversion     #
     # ------------------------------------------------------------------ #

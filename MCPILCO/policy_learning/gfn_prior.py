@@ -155,6 +155,48 @@ class GFNPrior:
         """Draw fresh samples from the trained network."""
         return self._draw(n)
 
+    def get_diffusion_marginals(self, n_samples=512):
+        """
+        Sample full GFN diffusion trajectories and return the per-diffusion-
+        step empirical Gaussian marginals (mean + diagonal variance),
+        WITHOUT discarding the intermediate denoising steps.
+
+        This is what Variant K uses: instead of the frozen terminal target,
+        it gives the GFN's distribution at EVERY diffusion step, so that
+        control step k can be matched to the GFN's distribution at the
+        corresponding diffusion step (diffusion-time <-> physical-time).
+
+        The GFN diffusion starts at zeros and denoises to N(mu_p, Sigma_p),
+        so:
+            step 0          ~ point mass at zeros        (var ~ 0)
+            intermediate    ~ progressively wider, mean sliding toward target
+            terminal (last) ~ N(mu_p, diag(sigma_p^2))   (the trained target)
+
+        Returns:
+            mu_per_step:  [T_gfn+1, state_dim]  empirical mean at each step
+            var_per_step: [T_gfn+1, state_dim]  empirical diagonal variance
+                          (floored at 1e-6 for numerical stability)
+        """
+        import math as _math
+        mu32 = torch.tensor([0.0, 0.0, _math.pi, 0.0],
+                            dtype=torch.float32, device=self.device)
+        sigma32 = torch.tensor([0.5, 0.5, 0.1, 0.1],
+                               dtype=torch.float32, device=self.device)
+
+        def log_reward(x, condition=None):
+            return -0.5 * ((x - mu32) ** 2 / sigma32 ** 2).sum(dim=-1)
+
+        with torch.no_grad():
+            init_state = torch.zeros(n_samples, self.state_dim,
+                                     dtype=torch.float32, device=self.device)
+            states, _, _, _ = self.gfn_model.get_trajectory_fwd(
+                init_state, None, log_reward)
+            # states: [n_samples, T_gfn+1, state_dim]
+        mu_per_step = states.mean(dim=0).to(dtype=self.dtype)      # [T+1, D]
+        var_per_step = states.var(dim=0).to(dtype=self.dtype)      # [T+1, D]
+        var_per_step = torch.clamp(var_per_step, min=1e-6)
+        return mu_per_step, var_per_step
+
     def log_density(self, x):
         """
         Unnormalised log p_target(x).
