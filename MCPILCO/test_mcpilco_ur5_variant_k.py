@@ -44,14 +44,16 @@ parser.add_argument("-seed", type=int, default=1)
 parser.add_argument("-checkpoint", type=str, default=None)
 parser.add_argument("-num_trials", type=int, default=5)
 parser.add_argument("-results_root", type=str, default="results_ur5_variant_k")
-parser.add_argument("--bptt", type=int, default=None)
+parser.add_argument("--bptt", type=int, default=20,
+                    help="BPTT truncation (steps). MIDDLE GROUND default=20 "
+                         "(horizon 200 -> 10 windows). None = full BPTT.")
 parser.add_argument("--fresh", action="store_true")
 parser.add_argument("--weighting", type=str, default="uniform",
                     choices=["uniform", "linear", "quadratic"])
-parser.add_argument("--kl_direction", type=str, default="forward",
+parser.add_argument("--kl_direction", type=str, default="reverse",
                     choices=["forward", "reverse"],
-                    help="forward = KL(GP||GFN), GFN var in denominator "
-                         "(FIX 1). reverse = original.")
+                    help="reverse = KL(GFN||GP), GP var in denominator "
+                         "(default). forward = KL(GP||GFN).")
 parser.add_argument("--beta", type=float, default=0.0)
 args = parser.parse_args()
 

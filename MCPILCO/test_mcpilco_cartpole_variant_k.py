@@ -34,15 +34,13 @@ p = argparse.ArgumentParser("test cartpole variant K (time-varying GFN diffusion
 p.add_argument("-seed", type=int, default=1)
 p.add_argument("-checkpoint", type=str, default=None)
 p.add_argument("-num_trials", type=int, default=5)
-p.add_argument("-bptt", type=int, default=None,
-               help="BPTT truncation length (steps). None = full BPTT. "
-                    "1 = per-step LOCAL update: each step's KL updates the "
-                    "policy only through that step's action (no backprop "
-                    "through the GP rollout chain).")
-p.add_argument("-kl_direction", default="forward", choices=["forward", "reverse"],
-               help="forward = KL(GP||GFN), GFN var in denominator (FIX 1, "
-                    "recommended). reverse = KL(GFN||GP), GP var in "
-                    "denominator (the original that blew up).")
+p.add_argument("-bptt", type=int, default=10,
+               help="BPTT truncation length (steps). MIDDLE GROUND default=10 "
+                    "(not full BPTT, not per-step K=1). None = full BPTT, "
+                    "1 = pure per-step local.")
+p.add_argument("-kl_direction", default="reverse", choices=["forward", "reverse"],
+               help="reverse = KL(GFN||GP), GP var in denominator (default). "
+                    "forward = KL(GP||GFN), GFN var in denominator.")
 locals().update(vars(p.parse_known_args()[0]))
 
 import pathlib
