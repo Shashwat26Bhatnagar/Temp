@@ -31,7 +31,10 @@ from policy_learning.ur5_chance_constraint import (
     UR5_Q_MIN_DEFAULT,
     UR5_Q_MAX_DEFAULT,
 )
-from policy_learning.kl_cost import reverse_kl_gaussian_diag
+from policy_learning.kl_cost import (
+    reverse_kl_gaussian_diag,
+    forward_kl_gaussian_diag,
+)
 
 
 class UR5_VariantK_Cost:
@@ -51,6 +54,7 @@ class UR5_VariantK_Cost:
                  alpha=5.0,
                  epsilon=0.10,
                  weighting='uniform',
+                 kl_direction='forward',
                  beta=0.0,
                  u_max=None,
                  q_min=UR5_Q_MIN_DEFAULT,
@@ -61,11 +65,14 @@ class UR5_VariantK_Cost:
                  device=torch.device('cpu')):
         assert weighting in ('uniform', 'linear', 'quadratic', 'none'), \
             f"Unknown weighting '{weighting}'."
+        assert kl_direction in ('forward', 'reverse'), \
+            f"Unknown kl_direction '{kl_direction}'."
 
         self.alpha     = alpha
         self.beta      = beta
         self.epsilon   = epsilon
         self.weighting = weighting
+        self.kl_direction = kl_direction
         self.q_min     = q_min
         self.q_max     = q_max
         self.dtype     = dtype
@@ -102,6 +109,12 @@ class UR5_VariantK_Cost:
 
         print(f"[UR5_VariantK_Cost] per-particle KL vs GFN TIME-VARYING "
               f"diffusion marginals (GOAL-REACHING curriculum)")
+        if kl_direction == 'forward':
+            print(f"[UR5_VariantK_Cost] kl_direction = FORWARD  KL(GP || GFN)  "
+                  f"-> GFN variance in denominator (FIX 1)")
+        else:
+            print(f"[UR5_VariantK_Cost] kl_direction = REVERSE  KL(GFN || GP)  "
+                  f"-> GP variance in denominator")
         print(f"[UR5_VariantK_Cost] alpha={alpha} beta={beta} epsilon={epsilon} "
               f"weighting='{weighting}'  T_gfn={self.T_gfn}")
         mid = self.T_gfn // 2
@@ -168,10 +181,16 @@ class UR5_VariantK_Cost:
 
         kl_per_step = torch.zeros(N_h_plus_1, dtype=dtype, device=device)
         for t in range(N_h_plus_1):
-            kl_particle = reverse_kl_gaussian_diag(
-                mu_p_traj[t], var_p_traj[t],
-                gp_means[t], gp_vars[t],
-            )  # [M]
+            if self.kl_direction == 'forward':
+                kl_particle = forward_kl_gaussian_diag(
+                    gp_means[t], gp_vars[t],       # q = per-particle GP
+                    mu_p_traj[t], var_p_traj[t],   # p = GFN marginal (denominator)
+                )  # [M]
+            else:
+                kl_particle = reverse_kl_gaussian_diag(
+                    mu_p_traj[t], var_p_traj[t],
+                    gp_means[t], gp_vars[t],
+                )  # [M]
             kl_particle = torch.clamp(kl_particle, min=0.0, max=1e6)
             kl_per_step[t] = kl_particle.mean()
 

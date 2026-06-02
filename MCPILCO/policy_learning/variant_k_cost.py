@@ -47,7 +47,10 @@ import torch
 
 from policy_learning.gfn_prior import GFNPrior
 from policy_learning.chance_constraint import cartpole_total_slack
-from policy_learning.kl_cost import reverse_kl_gaussian_diag
+from policy_learning.kl_cost import (
+    reverse_kl_gaussian_diag,
+    forward_kl_gaussian_diag,
+)
 
 
 class VariantK_Cost:
@@ -64,6 +67,7 @@ class VariantK_Cost:
                  alpha=5.0,
                  epsilon=0.10,
                  weighting='uniform',
+                 kl_direction='forward',
                  position_bound=2.4,
                  angle_bound=0.35,
                  num_ref_samples=512,
@@ -72,10 +76,15 @@ class VariantK_Cost:
                  device=torch.device('cpu')):
         assert weighting in ('quadratic', 'linear', 'none', 'uniform'), (
             f"Unknown weighting '{weighting}'.")
+        assert kl_direction in ('forward', 'reverse'), (
+            f"Unknown kl_direction '{kl_direction}'. Choose 'forward' "
+            f"(KL(GP||GFN), GFN var in denominator -- FIX 1) or 'reverse' "
+            f"(KL(GFN||GP), GP var in denominator -- the original that blew up).")
 
         self.alpha = alpha
         self.epsilon = epsilon
         self.weighting = weighting
+        self.kl_direction = kl_direction
         self.position_bound = position_bound
         self.angle_bound = angle_bound
         self.dtype = dtype
@@ -105,6 +114,13 @@ class VariantK_Cost:
 
         print(f"[VariantK_Cost] per-particle KL vs GFN TIME-VARYING "
               f"diffusion marginals")
+        if kl_direction == 'forward':
+            print(f"[VariantK_Cost] kl_direction = FORWARD  KL(GP || GFN)  "
+                  f"-> GFN variance in denominator (FIX 1: no explosion)")
+        else:
+            print(f"[VariantK_Cost] kl_direction = REVERSE  KL(GFN || GP)  "
+                  f"-> GP variance in denominator (WARNING: blows up on "
+                  f"tiny position variance)")
         print(f"[VariantK_Cost] alpha={alpha} epsilon={epsilon} "
               f"weighting='{weighting}'  T_gfn={self.T_gfn}")
         # Sanity print: GFN marginal at start, middle, end
@@ -172,13 +188,21 @@ class VariantK_Cost:
         gp_vars = self.gp_vars_seq.to(dtype=dtype, device=device)
         gp_vars = torch.clamp(gp_vars, min=1e-8)
 
-        # ---- Per-step, per-particle reverse KL(p_GFN(k) || GP_m(k)) ----
+        # ---- Per-step, per-particle KL ----
+        #  forward: KL(GP_m(k) || p_GFN(k))  -> Sigma_GFN in denominator (FIX 1)
+        #  reverse: KL(p_GFN(k) || GP_m(k))  -> Sigma_GP  in denominator (blows up)
         kl_per_step = torch.zeros(N_h_plus_1, dtype=dtype, device=device)
         for t in range(N_h_plus_1):
-            kl_particle = reverse_kl_gaussian_diag(
-                mu_p_traj[t], var_p_traj[t],   # GFN marginal at this step
-                gp_means[t], gp_vars[t],       # per-particle GP Gaussian
-            )  # [M]
+            if self.kl_direction == 'forward':
+                kl_particle = forward_kl_gaussian_diag(
+                    gp_means[t], gp_vars[t],       # q = per-particle GP Gaussian
+                    mu_p_traj[t], var_p_traj[t],   # p = GFN marginal (denominator)
+                )  # [M]
+            else:
+                kl_particle = reverse_kl_gaussian_diag(
+                    mu_p_traj[t], var_p_traj[t],   # p = GFN marginal
+                    gp_means[t], gp_vars[t],       # q = per-particle GP (denominator)
+                )  # [M]
             kl_particle = torch.clamp(kl_particle, min=0.0, max=1e6)
             kl_per_step[t] = kl_particle.mean()
 

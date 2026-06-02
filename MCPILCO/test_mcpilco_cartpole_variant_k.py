@@ -39,6 +39,10 @@ p.add_argument("-bptt", type=int, default=None,
                     "1 = per-step LOCAL update: each step's KL updates the "
                     "policy only through that step's action (no backprop "
                     "through the GP rollout chain).")
+p.add_argument("-kl_direction", default="forward", choices=["forward", "reverse"],
+               help="forward = KL(GP||GFN), GFN var in denominator (FIX 1, "
+                    "recommended). reverse = KL(GFN||GP), GP var in "
+                    "denominator (the original that blew up).")
 locals().update(vars(p.parse_known_args()[0]))
 
 import pathlib
@@ -159,6 +163,7 @@ cost_function_par = dict(
     alpha=5.0,
     epsilon=0.10,
     weighting='uniform',          # time-varying target IS the curriculum
+    kl_direction=kl_direction,    # FIX 1: 'forward' = GFN var in denominator
     position_bound=2.4,
     angle_bound=0.35,
     dtype=dtype,
@@ -169,7 +174,7 @@ cost_function_par = dict(
 # Build MC_PILCO_GPStats
 # ---------------------------------------------------------------------------
 print("\n---- Init policy learning object (MC_PILCO_GPStats) ----")
-results_dir = f"results_variant_k/{seed}"
+results_dir = f"results_variant_k_{kl_direction}/{seed}"
 os.makedirs(results_dir, exist_ok=True)
 
 MC_PILCO_init_dict = dict(

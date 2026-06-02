@@ -48,6 +48,10 @@ parser.add_argument("--bptt", type=int, default=None)
 parser.add_argument("--fresh", action="store_true")
 parser.add_argument("--weighting", type=str, default="uniform",
                     choices=["uniform", "linear", "quadratic"])
+parser.add_argument("--kl_direction", type=str, default="forward",
+                    choices=["forward", "reverse"],
+                    help="forward = KL(GP||GFN), GFN var in denominator "
+                         "(FIX 1). reverse = original.")
 parser.add_argument("--beta", type=float, default=0.0)
 args = parser.parse_args()
 
@@ -181,6 +185,7 @@ cost_function_par = dict(
     q_ref=q_ref, dq_ref=dq_ref, T_control=T_control,
     alpha=5.0, epsilon=0.10,
     weighting=args.weighting,
+    kl_direction=args.kl_direction,   # FIX 1: 'forward' = GFN var in denominator
     beta=args.beta,
     u_max=tuple(u_max),
     q_min=tuple(ur5_env.q_min), q_max=tuple(ur5_env.q_max),
@@ -188,7 +193,7 @@ cost_function_par = dict(
 )
 
 # ---------------------------------------------------------------------------
-log_dir  = pathlib.Path(args.results_root) / f"{seed}"
+log_dir  = pathlib.Path(f"{args.results_root}_{args.kl_direction}") / f"{seed}"
 log_file = log_dir / "log.pkl"
 log_dir.mkdir(parents=True, exist_ok=True)
 print(f"\n[variant_k] log_dir (abs): {log_dir.resolve()}")
