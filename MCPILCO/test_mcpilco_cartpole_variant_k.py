@@ -34,6 +34,11 @@ p = argparse.ArgumentParser("test cartpole variant K (time-varying GFN diffusion
 p.add_argument("-seed", type=int, default=1)
 p.add_argument("-checkpoint", type=str, default=None)
 p.add_argument("-num_trials", type=int, default=5)
+p.add_argument("-bptt", type=int, default=None,
+               help="BPTT truncation length (steps). None = full BPTT. "
+                    "1 = per-step LOCAL update: each step's KL updates the "
+                    "policy only through that step's action (no backprop "
+                    "through the GP rollout chain).")
 locals().update(vars(p.parse_known_args()[0]))
 
 import pathlib
@@ -185,7 +190,13 @@ MC_PILCO_init_dict = dict(
 )
 
 from policy_learning.mc_pilco_gp_stats import MC_PILCO_GPStats
-PL_obj = MC_PILCO_GPStats(**MC_PILCO_init_dict)
+PL_obj = MC_PILCO_GPStats(bptt_truncate=bptt, **MC_PILCO_init_dict)
+if bptt is not None:
+    print(f"[variant_k] PER-STEP LOCAL updates active (bptt_truncate={bptt}): "
+          f"each step's KL updates the policy only through that step's action.")
+else:
+    print(f"[variant_k] FULL BPTT active (gradient flows backward through the "
+          f"whole trajectory). Pass -bptt 1 for per-step local updates.")
 
 # ---------------------------------------------------------------------------
 # MC-PILCO options (identical to Variant C/J)
