@@ -48,6 +48,13 @@ wastes the dense supervision available in UR5.
    cartpole: μ_p = FIXED terminal [0,0,π,0];   weighting = QUADRATIC
    UR5:      μ_p = q_ref(t_k) per step;          weighting = quadratic
 ```
+**IMPORTANT — the GFN network is NOT used in this cost.** The target
+`μ_p=[0,0,π,0]`, `σ_p=[0.5,0.5,0.1,0.1]` is **hardcoded analytically** in
+`gfn_prior.py` lines 99–103. The trained diffusion sampler (`self.gfn_model`)
+is loaded only for an MMD sanity-check at init and is **never queried in
+`cost_function`**. Variant C is identical to reverse-KL against a fixed,
+hand-written Gaussian; delete the checkpoint and hardcode six numbers and it
+behaves the same. The GFN is decorative here.
 
 ### Variant H — fixed-metric per-particle tracking
 `policy_learning/ur5_variant_h_cost.py` (lines 196–198)
@@ -229,17 +236,38 @@ failure is the variance-in-denominator cheat + 12-D moment collapse.
 5. **Beware reverse KL when the model gets confident at the goal** — it ejects
    the policy from its own solution.
 
-### The uncomfortable meta-result
+### The uncomfortable meta-result (corrected)
 
-The variant that works best on UR5 (**H**) barely uses the GFN — it is
-classical tracking with the GFN's σ as a metric. The variants that genuinely
-lean on the GFN's distributional output (**C, F, G, K**) are exactly the ones
-that struggle. The honest research contribution is therefore a **negative
-result with a mechanism**: *distributional / variance-based surrogates are
-seductive but the variance-in-denominator is a trap; fixed-metric,
-task-structured costs are robust.* Where the GFN does help unambiguously is as
-a **goal specifier** for goal-reaching tasks (cartpole Variant C), not as a
-per-step transition model for tracking.
+Trace which variants actually query the trained GFN **network** (forward pass)
+inside the cost:
+
+| Variant | Target used in the cost | GFN network queried? | Outcome |
+|---|---|---|---|
+| B | analytical `log_density` (Gaussian energy) | ❌ no | weak |
+| C | hardcoded `μ_p, Σ_p` Gaussian (gfn_prior 99–103) | ❌ no | ✅ cartpole |
+| H | `q_ref` (IK reference) + σ as fixed metric | ❌ no | ✅ UR5 |
+| F,G | hardcoded/analytic Gaussian target | ❌ no | ✗ |
+| **K** | **live `predict_next_state(x,t)`** | ✅ **yes** | ✗ both |
+
+The result is starker than "H barely uses the GFN." **Every variant that
+works (C on cartpole, H on UR5) never queries the diffusion sampler's network
+at all** — they use an analytical Gaussian target (C) or the classical IK
+reference (H). The *only* variant that genuinely uses the trained GFN as a
+live model is **K**, and K fails on both tasks.
+
+So the honest research contribution is a **negative result with a mechanism**:
+1. *Variance-in-the-denominator is a trap* — it lets the optimizer cheat by
+   inflating spread instead of tracking, decoupling cost from task.
+2. *Fixed-metric, task-structured costs are robust* — and notably, those are
+   exactly the costs that do **not** rely on the trained diffusion sampler.
+3. *Using the GFN as a live per-step transition model (Variant K) actively
+   hurts* — its denoising conditionals are not physical trajectories.
+
+The trained diffusion sampler, as wired into these experiments, was never the
+source of the successes. That is an important and publishable finding in
+itself — it says the *analytical target* (which the GFN was trained to match)
+carried all the useful signal, and the network's learned dynamics did not add
+value (and, queried live in K, subtracted it).
 
 ---
 
